@@ -9,14 +9,17 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "commands/DeleteCommand.hpp"
 #include "commands/QuitCommand.hpp"
 #include "commands/WriteCommand.hpp"
 #include "core/Buffer.hpp"
+#include "core/Cursor.hpp"
 #include "core/KeyEvent.hpp"
 #include "core/Mode.hpp"
+#include "core/Terminal.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -48,6 +51,16 @@ std::string TrimCopy(std::string_view value) {
 
 bool IsCommandSeparator(char ch) {
   return ch == '|' || ch == ';';
+}
+
+std::string FitToWidth(std::string text, std::size_t width) {
+  if (width == 0) {
+    return {};
+  }
+  if (text.size() > width) {
+    text.resize(width);
+  }
+  return text;
 }
 }  // namespace
 
@@ -100,65 +113,93 @@ void EditorApp::LoadFile(int argc, char** argv) {
 }
 
 void EditorApp::Render() const {
+  const TerminalSize kSize = QueryTerminalSize();
+  const std::size_t kTotalRows = std::max<std::size_t>(kSize.rows, 3);
+  const std::size_t kTotalColumns = kSize.columns;
+
+  const std::size_t kInfoRows = 2;
+  const std::size_t kContentRows =
+      kTotalRows > kInfoRows ? kTotalRows - kInfoRows : 0;
+
+  UpdateScroll(kContentRows);
+
   const auto& buffer = state_.GetBuffer();
   const std::size_t kTotalLines = buffer.LineCount();
-  const std::string kFileLabel =
-      buffer.FilePath().empty() ? "[No Name]" : buffer.FilePath();
-  const bool kIsDirty = buffer.IsDirty();
-  const std::size_t kLineDigits =
-      std::max<std::size_t>(1, std::to_string(kTotalLines).size());
+  const std::size_t kLineDigits = std::max<std::size_t>(
+      1, std::to_string(std::max<std::size_t>(1, kTotalLines)).size());
   const std::size_t kPrefixWidth = 2 + kLineDigits + 1;
 
   std::ostringstream frame;
   frame << "\x1b[?25l" << "\x1b[H";
 
-  frame << kFileLabel;
-  if (kIsDirty) {
-    frame << " [+]";
-  }
-  frame << "\x1b[K\n";
+  for (std::size_t row = 0; row < kContentRows; ++row) {
+    std::ostringstream line_stream;
+    const std::size_t kLineIndex = scroll_offset_ + row;
+    if (kLineIndex < kTotalLines) {
+      const bool kIsCursorLine = kLineIndex == state_.CursorLine();
+      line_stream << (kIsCursorLine ? "> " : "  ");
+      line_stream << std::setw(static_cast<int>(kLineDigits))
+                  << (kLineIndex + 1) << ' ' << buffer.GetLine(kLineIndex);
+    } else {
+      line_stream << "  " << std::string(kLineDigits, ' ') << ' ' << '~';
+    }
 
-  for (std::size_t i = 0; i < kTotalLines; ++i) {
-    const bool kIsCursor = i == state_.CursorLine();
-    frame << (kIsCursor ? "> " : "  ");
-    frame << std::setw(static_cast<int>(kLineDigits)) << (i + 1) << ' '
-          << buffer.GetLine(i) << "\x1b[K\n";
+    std::string line_text = FitToWidth(line_stream.str(), kTotalColumns);
+    frame << line_text << "\x1b[K";
+    frame << '\n';
   }
 
-  std::ostringstream status_line;
-  status_line << ModeLabel(state_.CurrentMode()) << ' ' << kFileLabel;
-  if (kIsDirty) {
-    status_line << " [+]";
+  if (kContentRows == 0) {
+    frame << "\x1b[K\n";
   }
-  status_line << "  Ln " << (state_.CursorLine() + 1) << ", Col "
-              << (state_.CursorColumn() + 1);
-  frame << status_line.str() << "\x1b[K\n";
 
-  if (!state_.Status().empty()) {
-    frame << state_.Status();
+  std::ostringstream status_stream;
+  const std::string kFileLabel =
+      buffer.FilePath().empty() ? "[No Name]" : buffer.FilePath();
+  status_stream << ModeLabel(state_.CurrentMode()) << ' ' << kFileLabel;
+  if (buffer.IsDirty()) {
+    status_stream << " [+]";
   }
-  frame << "\x1b[K\n";
+  status_stream << "  Ln " << (state_.CursorLine() + 1) << ", Col "
+                << (state_.CursorColumn() + 1) << "  Lines " << kTotalLines;
+  frame << FitToWidth(status_stream.str(), kTotalColumns) << "\x1b[K" << '\n';
 
+  std::string info_line;
   if (state_.CurrentMode() == Mode::kCommandLine) {
-    frame << kCommandPrefix << command_buffer_ << "\x1b[K";
+    info_line = std::string(1, kCommandPrefix) + command_buffer_;
+  } else {
+    info_line = state_.Status();
   }
+  frame << FitToWidth(std::move(info_line), kTotalColumns) << "\x1b[K";
 
   frame << "\x1b[J";
 
-  std::size_t cursor_row = 1;
-  std::size_t cursor_column = 1;
-
+  Cursor cursor;
   if (state_.CurrentMode() == Mode::kCommandLine) {
-    const std::size_t kCommandRow = 1 + kTotalLines + 2 + 1;
-    cursor_row = kCommandRow;
-    cursor_column = 1 + 1 + command_buffer_.size();
+    cursor.row = kContentRows + 2;
+    cursor.column = 1 + 1 + command_buffer_.size();
   } else {
-    cursor_row = 2 + state_.CursorLine();
-    cursor_column = kPrefixWidth + state_.CursorColumn() + 1;
+    if (kContentRows == 0) {
+      cursor.row = 1;
+    } else {
+      const std::size_t kRelativeLine =
+          state_.CursorLine() < scroll_offset_
+              ? 0
+              : state_.CursorLine() - scroll_offset_;
+      cursor.row = std::min<std::size_t>(kRelativeLine + 1, kContentRows);
+    }
+    cursor.column = kPrefixWidth + state_.CursorColumn() + 1;
   }
 
-  cursor_row = std::max<std::size_t>(1, cursor_row);
-  cursor_column = std::max<std::size_t>(1, cursor_column);
+  cursor.row = std::max<std::size_t>(1, cursor.row);
+  cursor.column = std::max<std::size_t>(1, cursor.column);
+
+  if (kTotalRows > 0 && cursor.row > kTotalRows) {
+    cursor.row = kTotalRows;
+  }
+  if (kTotalColumns > 0 && cursor.column > kTotalColumns) {
+    cursor.column = kTotalColumns;
+  }
 
   const std::string kFrameContent = frame.str();
   if (kFrameContent != previous_frame_) {
@@ -166,7 +207,7 @@ void EditorApp::Render() const {
     previous_frame_ = kFrameContent;
   }
 
-  std::cout << "\x1b[" << cursor_row << ';' << cursor_column << 'H'
+  std::cout << "\x1b[" << cursor.row << ';' << cursor.column << 'H'
             << "\x1b[?25h" << std::flush;
 }
 
@@ -486,5 +527,37 @@ bool EditorApp::ExecuteCommandLine(const std::string& line) {
   }
 
   return success;
+}
+
+void EditorApp::UpdateScroll(std::size_t content_rows) const {
+  if (content_rows == 0) {
+    scroll_offset_ = 0;
+    return;
+  }
+
+  const auto& buffer = state_.GetBuffer();
+  const std::size_t kTotalLines = buffer.LineCount();
+
+  if (kTotalLines == 0) {
+    scroll_offset_ = 0;
+    return;
+  }
+
+  if (scroll_offset_ >= kTotalLines) {
+    scroll_offset_ = kTotalLines - 1;
+  }
+
+  const std::size_t kCursorLine = state_.CursorLine();
+  if (kCursorLine < scroll_offset_) {
+    scroll_offset_ = kCursorLine;
+  } else if (kCursorLine >= scroll_offset_ + content_rows) {
+    scroll_offset_ = kCursorLine - content_rows + 1;
+  }
+
+  const std::size_t kMaxOffset =
+      kTotalLines > content_rows ? kTotalLines - content_rows : 0;
+  if (scroll_offset_ > kMaxOffset) {
+    scroll_offset_ = kMaxOffset;
+  }
 }
 }  // namespace core

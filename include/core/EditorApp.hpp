@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 #include "core/ConsoleKeySource.hpp"
@@ -21,6 +22,7 @@ class EditorApp {
   void HandleInsertMode(const KeyEvent& event);
   void HandleCommandMode(const KeyEvent& event);
   bool ExecuteCommandLine(const std::string& line);
+  void UpdateScroll(std::size_t content_rows) const;
   void InsertCharacter(char value);
   void InsertNewline();
   void HandleBackspace();
@@ -32,5 +34,6 @@ class EditorApp {
   std::string command_buffer_;
   std::string pending_normal_command_;
   mutable std::string previous_frame_;
+  mutable std::size_t scroll_offset_ = 0;
 };
 }  // namespace core
