@@ -70,12 +70,23 @@ void EditorState::RequestQuit() noexcept {
   running_ = false;
 }
 
-void EditorState::SetStatus(const std::string& message) {
+void EditorState::SetStatus(const std::string& message,
+                            StatusSeverity severity) {
   status_message_ = message;
+  status_severity_ = severity;
+}
+
+void EditorState::ClearStatus() noexcept {
+  status_message_.clear();
+  status_severity_ = StatusSeverity::kNone;
 }
 
 const std::string& EditorState::Status() const noexcept {
   return status_message_;
+}
+
+StatusSeverity EditorState::StatusLevel() const noexcept {
+  return status_severity_;
 }
 
 void EditorState::ClampCursor() {

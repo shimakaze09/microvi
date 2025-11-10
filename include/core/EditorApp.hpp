@@ -6,6 +6,7 @@
 #include "core/ConsoleKeySource.hpp"
 #include "core/EditorState.hpp"
 #include "core/InputHandler.hpp"
+#include "core/Theme.hpp"
 
 namespace core {
 class EditorApp {
@@ -39,5 +40,6 @@ class EditorApp {
   mutable bool first_render_ = true;
   mutable std::string previous_frame_;
   mutable std::size_t scroll_offset_ = 0;
+  Theme theme_ = DefaultTheme();
 };
 }  // namespace core

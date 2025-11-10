@@ -5,8 +5,8 @@
 
 #include "commands/DeleteCommand.hpp"
 
-#include "core/EditorApp.hpp"
 #include "core/Buffer.hpp"
+#include "core/EditorState.hpp"
 
 namespace {
 int ParseLineArgument(const std::string& input) {
@@ -35,13 +35,13 @@ bool DeleteCommand::Matches(const std::string& input) const {
 }
 
 void DeleteCommand::Execute(core::EditorState& state,
-                             const std::string& input) {
+                            const std::string& input) {
   const int kParsed = ParseLineArgument(input.substr(2));
   std::size_t target_line = state.CursorLine();
 
   if (kParsed > 0) {
     if (static_cast<std::size_t>(kParsed) == 0) {
-      state.SetStatus("Invalid line number");
+      state.SetStatus("Invalid line number", core::StatusSeverity::kWarning);
       return;
     }
     target_line = static_cast<std::size_t>(kParsed - 1);
@@ -49,7 +49,7 @@ void DeleteCommand::Execute(core::EditorState& state,
 
   auto& buffer = state.GetBuffer();
   if (target_line >= buffer.LineCount()) {
-    state.SetStatus("Line out of range");
+    state.SetStatus("Line out of range", core::StatusSeverity::kWarning);
     return;
   }
 
@@ -58,6 +58,6 @@ void DeleteCommand::Execute(core::EditorState& state,
 
   std::ostringstream message;
   message << "Deleted line " << target_line + 1;
-  state.SetStatus(message.str());
+  state.SetStatus(message.str(), core::StatusSeverity::kInfo);
 }
 }  // namespace commands

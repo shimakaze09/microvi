@@ -26,17 +26,18 @@ void WriteCommand::Execute(core::EditorState& state, const std::string& input) {
       kArgument.empty() ? buffer.FilePath() : kArgument;
 
   if (kTargetPath.empty()) {
-    state.SetStatus("No file specified for write");
+    state.SetStatus("No file specified for write",
+                    core::StatusSeverity::kWarning);
     return;
   }
 
   if (!buffer.SaveToFile(kTargetPath)) {
-    state.SetStatus("Failed to write file");
+    state.SetStatus("Failed to write file", core::StatusSeverity::kError);
     return;
   }
 
   std::ostringstream message;
   message << "Wrote " << buffer.LineCount() << " lines";
-  state.SetStatus(message.str());
+  state.SetStatus(message.str(), core::StatusSeverity::kInfo);
 }
 }  // namespace commands

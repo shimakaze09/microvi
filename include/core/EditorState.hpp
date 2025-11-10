@@ -1,14 +1,22 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include "Buffer.hpp"
 #include "Mode.hpp"
 
 namespace core {
+enum class StatusSeverity : std::uint8_t {
+  kNone,
+  kInfo,
+  kWarning,
+  kError,
+};
+
 class EditorState {
-public:
+ public:
   EditorState();
 
   Buffer& GetBuffer() noexcept;
@@ -25,10 +33,13 @@ public:
   void SetMode(Mode mode) noexcept;
   void RequestQuit() noexcept;
 
-  void SetStatus(const std::string& message);
+  void SetStatus(const std::string& message,
+                 StatusSeverity severity = StatusSeverity::kInfo);
+  void ClearStatus() noexcept;
   const std::string& Status() const noexcept;
+  StatusSeverity StatusLevel() const noexcept;
 
-private:
+ private:
   void ClampCursor();
 
   Buffer buffer_;
@@ -37,5 +48,6 @@ private:
   Mode mode_ = Mode::kNormal;
   bool running_ = true;
   std::string status_message_;
+  StatusSeverity status_severity_ = StatusSeverity::kNone;
 };
-} // namespace core
+}  // namespace core

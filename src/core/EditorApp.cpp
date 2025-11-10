@@ -20,6 +20,7 @@
 #include "core/KeyEvent.hpp"
 #include "core/Mode.hpp"
 #include "core/Terminal.hpp"
+#include "core/Theme.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -51,6 +52,25 @@ std::string TrimCopy(std::string_view value) {
 
 bool IsCommandSeparator(char ch) {
   return ch == '|' || ch == ';';
+}
+
+bool IsHighlightSeverity(core::StatusSeverity severity) {
+  return severity == core::StatusSeverity::kWarning ||
+         severity == core::StatusSeverity::kError;
+}
+
+const std::string& HighlightColor(const core::Theme& theme,
+                                  core::StatusSeverity severity) {
+  switch (severity) {
+    case core::StatusSeverity::kWarning:
+      return theme.status_warning;
+    case core::StatusSeverity::kError:
+      return theme.status_error;
+    case core::StatusSeverity::kInfo:
+    case core::StatusSeverity::kNone:
+    default:
+      return theme.status_info;
+  }
 }
 
 std::string FitToWidth(std::string text, std::size_t width) {
@@ -97,21 +117,21 @@ void EditorApp::LoadFile(int argc, char** argv) {
         path_cstr != nullptr ? std::string(path_cstr) : std::string{};
 
     if (kPath.empty()) {
-      state_.SetStatus("New Buffer");
+      state_.SetStatus("New Buffer", StatusSeverity::kInfo);
       return;
     }
 
     if (!buffer.LoadFromFile(kPath)) {
       std::cerr << "Failed to load file: " << kPath << '\n';
       buffer.SetFilePath(kPath);
-      state_.SetStatus("New file");
+      state_.SetStatus("New file", StatusSeverity::kInfo);
     } else {
-      state_.SetStatus("Loaded file");
+      state_.SetStatus("Loaded file", StatusSeverity::kInfo);
     }
     return;
   }
 
-  state_.SetStatus("New Buffer");
+  state_.SetStatus("New Buffer", StatusSeverity::kInfo);
 }
 
 void EditorApp::Render() const {
@@ -155,24 +175,40 @@ void EditorApp::Render() const {
     frame << "\x1b[K\n";
   }
 
-  std::ostringstream status_stream;
-  const std::string kFileLabel =
-      buffer.FilePath().empty() ? "[No Name]" : buffer.FilePath();
-  status_stream << ModeLabel(state_.CurrentMode()) << ' ' << kFileLabel;
-  if (buffer.IsDirty()) {
-    status_stream << " [+]";
-  }
-  status_stream << "  Ln " << (state_.CursorLine() + 1) << ", Col "
-                << (state_.CursorColumn() + 1) << "  Lines " << kTotalLines;
-  frame << FitToWidth(status_stream.str(), kTotalColumns) << "\x1b[K" << '\n';
+  const StatusSeverity kSeverity = state_.StatusLevel();
+  const bool kHighlightStatus = IsHighlightSeverity(kSeverity);
 
-  std::string info_line;
-  if (state_.CurrentMode() == Mode::kCommandLine) {
-    info_line = std::string(1, kCommandPrefix) + command_buffer_;
+  if (kHighlightStatus) {
+    std::string highlight_text = FitToWidth(state_.Status(), kTotalColumns);
+    const std::string& color = HighlightColor(theme_, kSeverity);
+    const std::size_t kPadding = kTotalColumns > highlight_text.size()
+                                     ? kTotalColumns - highlight_text.size()
+                                     : 0;
+    frame << color << highlight_text;
+    if (kPadding > 0) {
+      frame << std::string(kPadding, ' ');
+    }
+    frame << theme_.reset << "\x1b[K" << '\n';
   } else {
-    info_line = state_.Status();
+    std::ostringstream status_stream;
+    const std::string kFileLabel =
+        buffer.FilePath().empty() ? "[No Name]" : buffer.FilePath();
+    status_stream << ModeLabel(state_.CurrentMode()) << ' ' << kFileLabel;
+    if (buffer.IsDirty()) {
+      status_stream << " [+]";
+    }
+    status_stream << "  Ln " << (state_.CursorLine() + 1) << ", Col "
+                  << (state_.CursorColumn() + 1) << "  Lines " << kTotalLines;
+    frame << FitToWidth(status_stream.str(), kTotalColumns) << "\x1b[K" << '\n';
   }
-  frame << FitToWidth(std::move(info_line), kTotalColumns) << "\x1b[K";
+
+  std::string message_line;
+  if (state_.CurrentMode() == Mode::kCommandLine) {
+    message_line = std::string(1, kCommandPrefix) + command_buffer_;
+  } else if (kSeverity == StatusSeverity::kInfo) {
+    message_line = state_.Status();
+  }
+  frame << FitToWidth(message_line, kTotalColumns) << "\x1b[K";
 
   frame << "\x1b[J";
 
@@ -238,37 +274,38 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
   if (event.code == KeyCode::kEscape) {
     if (!pending_normal_command_.empty()) {
       pending_normal_command_.clear();
-      state_.SetStatus("Command cancelled");
     }
+    state_.ClearStatus();
     return;
   }
 
   if (event.code == KeyCode::kArrowDown) {
     pending_normal_command_.clear();
     state_.MoveCursorLine(1);
-    state_.SetStatus("Moved down");
+    state_.ClearStatus();
     return;
   }
   if (event.code == KeyCode::kArrowUp) {
     pending_normal_command_.clear();
     state_.MoveCursorLine(-1);
-    state_.SetStatus("Moved up");
+    state_.ClearStatus();
     return;
   }
   if (event.code == KeyCode::kArrowLeft) {
     pending_normal_command_.clear();
     state_.MoveCursorColumn(-1);
-    state_.SetStatus("Moved left");
+    state_.ClearStatus();
     return;
   }
   if (event.code == KeyCode::kArrowRight) {
     pending_normal_command_.clear();
     state_.MoveCursorColumn(1);
-    state_.SetStatus("Moved right");
+    state_.ClearStatus();
     return;
   }
   if (event.code != KeyCode::kCharacter) {
     pending_normal_command_.clear();
+    state_.ClearStatus();
     return;
   }
 
@@ -284,12 +321,15 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
         const std::size_t kTargetLine = state_.CursorLine();
         if (buffer.DeleteLine(kTargetLine)) {
           state_.MoveCursorLine(0);
-          state_.SetStatus("Deleted line");
+          std::ostringstream message;
+          message << "Deleted line " << (kTargetLine + 1);
+          state_.SetStatus(message.str(), StatusSeverity::kInfo);
         } else {
-          state_.SetStatus("Delete failed");
+          state_.SetStatus("Delete failed", StatusSeverity::kWarning);
         }
         return;
       }
+      state_.SetStatus("d command requires motion", StatusSeverity::kWarning);
     }
     // Fall through for unmatched combinations so the current key is
     // processed normally.
@@ -299,41 +339,41 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
     case 'i':
       pending_normal_command_.clear();
       state_.SetMode(Mode::kInsert);
-      state_.SetStatus("Insert mode (ESC to leave)");
+      state_.ClearStatus();
       break;
     case 'j':
       pending_normal_command_.clear();
       state_.MoveCursorLine(1);
-      state_.SetStatus("Moved down");
+      state_.ClearStatus();
       break;
     case 'k':
       pending_normal_command_.clear();
       state_.MoveCursorLine(-1);
-      state_.SetStatus("Moved up");
+      state_.ClearStatus();
       break;
     case 'h':
       pending_normal_command_.clear();
       state_.MoveCursorColumn(-1);
-      state_.SetStatus("Moved left");
+      state_.ClearStatus();
       break;
     case 'l':
       pending_normal_command_.clear();
       state_.MoveCursorColumn(1);
-      state_.SetStatus("Moved right");
+      state_.ClearStatus();
       break;
     case 'd':
       pending_normal_command_ = "d";
-      state_.SetStatus("d");
+      state_.ClearStatus();
       break;
     case kCommandPrefix:
       pending_normal_command_.clear();
       state_.SetMode(Mode::kCommandLine);
       command_buffer_.clear();
-      state_.SetStatus("Command mode");
+      state_.ClearStatus();
       break;
     default:
       pending_normal_command_.clear();
-      state_.SetStatus("Input ignored in normal mode");
+      state_.SetStatus("Not mapped in normal mode", StatusSeverity::kWarning);
       break;
   }
 }
@@ -342,7 +382,7 @@ void EditorApp::HandleInsertMode(const KeyEvent& event) {
   switch (event.code) {
     case KeyCode::kEscape:
       state_.SetMode(Mode::kNormal);
-      state_.SetStatus("Exited insert mode");
+      state_.ClearStatus();
       return;
     case KeyCode::kEnter:
       InsertNewline();
@@ -377,13 +417,13 @@ void EditorApp::HandleCommandMode(const KeyEvent& event) {
     case KeyCode::kEscape:
       command_buffer_.clear();
       state_.SetMode(Mode::kNormal);
-      state_.SetStatus("Command cancelled");
+      state_.ClearStatus();
       return;
     case KeyCode::kEnter: {
       if (command_buffer_.empty()) {
-        state_.SetStatus("Command line empty");
+        state_.SetStatus("Command line empty", StatusSeverity::kWarning);
       } else if (!ExecuteCommandLine(command_buffer_)) {
-        state_.SetStatus("Unknown command");
+        state_.SetStatus("Unknown command", StatusSeverity::kWarning);
       }
       command_buffer_.clear();
       state_.SetMode(Mode::kNormal);
@@ -450,7 +490,7 @@ void EditorApp::InsertNewline() {
   std::string tail = current.substr(kColumn);
   current.erase(kColumn);
   if (!buffer.InsertLine(kLine + 1, tail)) {
-    state_.SetStatus("Insert failed");
+    state_.SetStatus("Insert failed", StatusSeverity::kError);
     return;
   }
 
