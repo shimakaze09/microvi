@@ -73,6 +73,7 @@ EditorApp::EditorApp() {
 }
 
 int EditorApp::Run(int argc, char** argv) {
+  PrepareScreen();
   LoadFile(argc, argv);
   Render();
 
@@ -81,6 +82,7 @@ int EditorApp::Run(int argc, char** argv) {
     HandleEvent(kEvent);
   }
 
+  RestoreScreen();
   return 0;
 }
 
@@ -203,12 +205,16 @@ void EditorApp::Render() const {
 
   const std::string kFrameContent = frame.str();
   if (kFrameContent != previous_frame_) {
+    if (first_render_) {
+      std::cout << "\x1b[2J";
+    }
     std::cout << kFrameContent;
     previous_frame_ = kFrameContent;
   }
 
   std::cout << "\x1b[" << cursor.row << ';' << cursor.column << 'H'
             << "\x1b[?25h" << std::flush;
+  first_render_ = false;
 }
 
 void EditorApp::HandleEvent(const KeyEvent& event) {
@@ -467,6 +473,27 @@ void EditorApp::ConfigureConsole() {
     SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
   }
 #endif
+}
+
+void EditorApp::PrepareScreen() {
+  if (screen_prepared_) {
+    return;
+  }
+
+  previous_frame_.clear();
+  first_render_ = true;
+  screen_prepared_ = true;
+}
+
+void EditorApp::RestoreScreen() {
+  if (!screen_prepared_) {
+    return;
+  }
+
+  std::cout << "\x1b[?25h\x1b[0m\x1b[2J\x1b[H" << std::flush;
+  screen_prepared_ = false;
+  previous_frame_.clear();
+  first_render_ = true;
 }
 
 bool EditorApp::ExecuteCommandLine(const std::string& line) {

@@ -27,12 +27,16 @@ class EditorApp {
   void InsertNewline();
   void HandleBackspace();
   static void ConfigureConsole();
+  void PrepareScreen();
+  void RestoreScreen();
 
   EditorState state_;
   ConsoleKeySource key_source_;
   InputHandler command_handler_;
   std::string command_buffer_;
   std::string pending_normal_command_;
+  bool screen_prepared_ = false;
+  mutable bool first_render_ = true;
   mutable std::string previous_frame_;
   mutable std::size_t scroll_offset_ = 0;
 };
