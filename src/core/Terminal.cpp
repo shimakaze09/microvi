@@ -10,10 +10,10 @@
 namespace core {
 auto QueryTerminalSize() -> TerminalSize {
 #ifdef _WIN32
-  const HANDLE handle = GetStdHandle(STD_OUTPUT_HANDLE);
-  if (handle != nullptr && handle != INVALID_HANDLE_VALUE) {
+  const HANDLE kHandle = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (kHandle != nullptr && kHandle != INVALID_HANDLE_VALUE) {
     CONSOLE_SCREEN_BUFFER_INFO info;
-    if (GetConsoleScreenBufferInfo(handle, &info) != 0) {
+    if (GetConsoleScreenBufferInfo(kHandle, &info) != 0) {
       const std::size_t kRows = static_cast<std::size_t>(info.srWindow.Bottom -
                                                          info.srWindow.Top + 1);
       const std::size_t kColumns = static_cast<std::size_t>(

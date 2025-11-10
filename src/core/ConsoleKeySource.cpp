@@ -1,4 +1,7 @@
 #include "core/ConsoleKeySource.hpp"
+
+#include <thread>
+
 #include "core/KeyEvent.hpp"
 
 #ifdef _WIN32
@@ -6,7 +9,9 @@
 #else
 #include <unistd.h>
 
+#include <fcntl.h>
 #include <cerrno>
+
 #endif
 
 namespace core {
@@ -66,85 +71,116 @@ constexpr unsigned char kArrowLeftSeq = 'D';
 
 ConsoleKeySource::ConsoleKeySource() {
 #ifndef _WIN32
-  if (tcgetattr(STDIN_FILENO, &m_original) == 0) {
-    termios raw = m_original;
+  if (tcgetattr(STDIN_FILENO, &original_) == 0) {
+    termios raw = original_;
     raw.c_lflag &= static_cast<tcflag_t>(~(ICANON | ECHO));
     raw.c_iflag &= static_cast<tcflag_t>(~(IXON | ICRNL));
     raw.c_oflag &= static_cast<tcflag_t>(~OPOST);
     raw.c_cc[VMIN] = 0;
-    raw.c_cc[VTIME] = 1;
+    raw.c_cc[VTIME] = 0;
     if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0) {
-      m_has_original_mode_ = true;
+      has_original_mode_ = true;
     }
+  }
+
+  original_flags_ = fcntl(STDIN_FILENO, F_GETFL, 0);
+  if (original_flags_ != -1) {
+    fcntl(STDIN_FILENO, F_SETFL, original_flags_ | O_NONBLOCK);
   }
 #endif
 }
 
 ConsoleKeySource::~ConsoleKeySource() {
 #ifndef _WIN32
-  if (m_has_original_mode_) {
-    tcsetattr(STDIN_FILENO, TCSANOW, &m_original);
+  if (has_original_mode_) {
+    tcsetattr(STDIN_FILENO, TCSANOW, &original_);
+  }
+  if (original_flags_ != -1) {
+    fcntl(STDIN_FILENO, F_SETFL, original_flags_);
   }
 #endif
 }
 
 KeyEvent ConsoleKeySource::Next() {
+  KeyEvent event{};
+  while (!Poll(event)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return event;
+}
+
+bool ConsoleKeySource::Poll(KeyEvent& event) {
 #ifdef _WIN32
+  if (_kbhit() == 0) {
+    return false;
+  }
+
   const int kCode = _getch();
   last_code_ = kCode;
   if (kCode == kPrefixZero || kCode == kPrefixExtended) {
     const int kExtended = _getch();
     last_code_ = kExtended;
-    return TranslateExtended(kExtended);
+    event = TranslateExtended(kExtended);
+  } else {
+    event = TranslateChar(kCode);
   }
-  return TranslateChar(kCode);
+  return true;
 #else
   unsigned char ch = 0;
-  for (;;) {
-    const ssize_t count = ::read(STDIN_FILENO, &ch, 1);
-    if (count > 0) {
-      break;
+  const ssize_t count = ::read(STDIN_FILENO, &ch, 1);
+  if (count <= 0) {
+    if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+        errno != EINTR) {
+      event = KeyEvent{.code = KeyCode::kEscape};
+      return true;
     }
-    if (count < 0 && errno != EINTR) {
-      return key_event{.code = key_code::kEscape};
-    }
+    return false;
   }
 
-  m_last_code_ = ch;
+  last_code_ = ch;
 
   if (ch == kEscapeChar) {
     unsigned char seq = 0;
     const ssize_t first = ::read(STDIN_FILENO, &seq, 1);
     if (first <= 0) {
-      return key_event{.code = key_code::kEscape};
+      event = KeyEvent{.code = KeyCode::kEscape};
+      return true;
     }
 
     if (seq == kEscapeBracket) {
       unsigned char final = 0;
       const ssize_t second = ::read(STDIN_FILENO, &final, 1);
       if (second <= 0) {
-        return key_event{.code = key_code::kEscape};
+        event = KeyEvent{.code = KeyCode::kEscape};
+        return true;
       }
 
-      m_last_code_ = final;
+      last_code_ = final;
       switch (final) {
         case kArrowUpSeq:
-          return key_event{.code = key_code::kArrowUp};
+          event = KeyEvent{.code = KeyCode::kArrowUp};
+          return true;
         case kArrowDownSeq:
-          return key_event{.code = key_code::kArrowDown};
+          event = KeyEvent{.code = KeyCode::kArrowDown};
+          return true;
         case kArrowLeftSeq:
-          return key_event{.code = key_code::kArrowLeft};
+          event = KeyEvent{.code = KeyCode::kArrowLeft};
+          return true;
         case kArrowRightSeq:
-          return key_event{.code = key_code::kArrowRight};
+          event = KeyEvent{.code = KeyCode::kArrowRight};
+          return true;
         default:
-          return key_event{.code = key_code::kEscape};
+          event = KeyEvent{.code = KeyCode::kEscape};
+          return true;
       }
     }
 
-    return key_event{.code = key_code::kEscape};
+    event = KeyEvent{.code = KeyCode::kEscape};
+    return true;
   }
 
-  return TranslateChar(static_cast<int>(ch));
+  event = TranslateChar(static_cast<int>(ch));
+  return true;
 #endif
 }
 }  // namespace core

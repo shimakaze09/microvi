@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+
 #include "core/KeyEvent.hpp"
 
 #ifndef _WIN32
@@ -8,7 +10,7 @@
 
 namespace core {
 class ConsoleKeySource {
-public:
+ public:
   ConsoleKeySource();
   ~ConsoleKeySource();
 
@@ -18,12 +20,14 @@ public:
   ConsoleKeySource& operator=(ConsoleKeySource&&) = delete;
 
   KeyEvent Next();
+  bool Poll(KeyEvent& event);
 
-private:
+ private:
 #ifndef _WIN32
   bool has_original_mode_ = false;
-  termios original{};
+  termios original_{};
+  int original_flags_ = -1;
 #endif
   int last_code_ = 0;
 };
-} // namespace core
+}  // namespace core

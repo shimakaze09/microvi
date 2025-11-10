@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -9,6 +10,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -95,13 +97,27 @@ EditorApp::EditorApp() {
 int EditorApp::Run(int argc, char** argv) {
   PrepareScreen();
   LoadFile(argc, argv);
+  StartInputLoop();
   Render();
 
+  constexpr auto kFrameDuration = std::chrono::milliseconds(16);
+
   while (state_.IsRunning()) {
-    const KeyEvent kEvent = key_source_.Next();
-    HandleEvent(kEvent);
+    const auto kFrameStart = std::chrono::steady_clock::now();
+    ProcessPendingEvents();
+    if (!state_.IsRunning()) {
+      break;
+    }
+
+    Render();
+
+    const auto kElapsed = std::chrono::steady_clock::now() - kFrameStart;
+    if (kElapsed < kFrameDuration) {
+      std::this_thread::sleep_for(kFrameDuration - kElapsed);
+    }
   }
 
+  StopInputLoop();
   RestoreScreen();
   return 0;
 }
@@ -266,8 +282,6 @@ void EditorApp::HandleEvent(const KeyEvent& event) {
       HandleNormalMode(event);
       break;
   }
-
-  Render();
 }
 
 void EditorApp::HandleNormalMode(const KeyEvent& event) {
@@ -534,6 +548,40 @@ void EditorApp::RestoreScreen() {
   screen_prepared_ = false;
   previous_frame_.clear();
   first_render_ = true;
+}
+
+void EditorApp::StartInputLoop() {
+  StopInputLoop();
+  input_thread_ =
+      std::jthread([this](std::stop_token token) { InputLoop(token); });
+}
+
+void EditorApp::StopInputLoop() {
+  if (input_thread_.joinable()) {
+    input_thread_.request_stop();
+    input_thread_.join();
+  }
+}
+
+void EditorApp::InputLoop(const std::stop_token& token) {
+  while (!token.stop_requested()) {
+    KeyEvent event{};
+    if (key_source_.Poll(event)) {
+      event_queue_.Push(event);
+    } else {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  }
+}
+
+void EditorApp::ProcessPendingEvents() {
+  auto events = event_queue_.ConsumeAll();
+  for (const KeyEvent& event : events) {
+    HandleEvent(event);
+    if (!state_.IsRunning()) {
+      break;
+    }
+  }
 }
 
 bool EditorApp::ExecuteCommandLine(const std::string& line) {

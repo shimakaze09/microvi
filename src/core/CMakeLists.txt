@@ -1,6 +1,7 @@
 set(MICROVI_CORE_SOURCES
   "Buffer.cpp"
   "ConsoleKeySource.cpp"
+  "EventQueue.cpp"
   "EditorState.cpp"
   "EditorApp.cpp"
   "InputHandler.cpp"
