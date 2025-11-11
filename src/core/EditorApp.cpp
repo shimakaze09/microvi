@@ -67,8 +67,7 @@ std::size_t AppendCountDigit(std::size_t current, std::size_t digit) {
 }
 
 std::string FormatPendingStatus(std::string_view pending_command,
-                                std::size_t prefix_count,
-                                bool has_prefix_count,
+                                std::size_t prefix_count, bool has_prefix_count,
                                 std::size_t motion_count,
                                 bool has_motion_count) {
   std::string status;
@@ -1169,6 +1168,23 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
       return;
     }
 
+    if (pending_normal_command_ == "y") {
+      const std::size_t kLine = state_.CursorLine();
+      const Buffer& buffer_view = state_.GetBuffer();
+      const std::size_t kColumn =
+          (std::min)(state_.CursorColumn(), buffer_view.GetLine(kLine).size());
+      pending_normal_command_.clear();
+      ResetCount();
+      if (kColumn == 0) {
+        state_.SetStatus("Nothing to yank", StatusSeverity::kWarning);
+      } else if (CopyCharacterRange(kLine, 0, kLine, kColumn)) {
+        state_.SetStatus("Yanked to line start", StatusSeverity::kInfo);
+      } else {
+        state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+      }
+      return;
+    }
+
     if (pending_normal_command_.empty()) {
       ResetCount();
       const std::size_t kLine = state_.CursorLine();
@@ -1180,8 +1196,7 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
   }
 
   if (std::isdigit(static_cast<unsigned char>(kValue)) != 0) {
-    const std::size_t kDigit =
-        static_cast<std::size_t>(kValue - '0');
+    const std::size_t kDigit = static_cast<std::size_t>(kValue - '0');
     if (pending_normal_command_.empty()) {
       has_prefix_count_ = true;
       prefix_count_ = AppendCountDigit(prefix_count_, kDigit);
@@ -1190,8 +1205,8 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
       has_motion_count_ = true;
       motion_count_ = AppendCountDigit(motion_count_, kDigit);
       state_.SetStatus(FormatPendingStatus(pending_normal_command_,
-                                          prefix_count_, has_prefix_count_,
-                                          motion_count_, has_motion_count_),
+                                           prefix_count_, has_prefix_count_,
+                                           motion_count_, has_motion_count_),
                        StatusSeverity::kInfo);
     }
     return;
@@ -1202,18 +1217,23 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
         pending_normal_command_ == "t" || pending_normal_command_ == "T") {
       const char kCommand = pending_normal_command_.front();
       pending_normal_command_.clear();
-      ApplyFindCommand(kCommand, false, kValue);
+      ApplyFindCommand(kCommand, FindCommandAction::kMove, kValue);
       return;
     }
 
-    if (pending_normal_command_.front() == 'd') {
-      if (pending_normal_command_.size() == 2) {
-        const char kCommand = pending_normal_command_.back();
-        pending_normal_command_.clear();
-        ApplyFindCommand(kCommand, true, kValue);
-        return;
-      }
+    const char kPending = pending_normal_command_.front();
+    if ((kPending == 'd' || kPending == 'y') &&
+        pending_normal_command_.size() == 2) {
+      const char kCommand = pending_normal_command_.back();
+      pending_normal_command_.clear();
+      const FindCommandAction kAction = kPending == 'd'
+                                            ? FindCommandAction::kDelete
+                                            : FindCommandAction::kYank;
+      ApplyFindCommand(kCommand, kAction, kValue);
+      return;
+    }
 
+    if (kPending == 'd') {
       switch (kValue) {
         case 'd': {
           pending_normal_command_.clear();
@@ -1605,19 +1625,19 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
           pending_normal_command_.push_back(kValue);
           state_.SetStatus(
               FormatPendingStatus(pending_normal_command_, prefix_count_,
-                                   has_prefix_count_, motion_count_,
-                                   has_motion_count_),
+                                  has_prefix_count_, motion_count_,
+                                  has_motion_count_),
               StatusSeverity::kInfo);
           return;
         }
         case ';': {
           pending_normal_command_.clear();
-          ApplyRepeatFind(false, true);
+          ApplyRepeatFind(false, FindCommandAction::kDelete);
           return;
         }
         case ',': {
           pending_normal_command_.clear();
-          ApplyRepeatFind(true, true);
+          ApplyRepeatFind(true, FindCommandAction::kDelete);
           return;
         }
         case '$': {
@@ -1665,6 +1685,424 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
         default:
           pending_normal_command_.clear();
           state_.SetStatus("d command requires motion",
+                           StatusSeverity::kWarning);
+          ResetCount();
+          return;
+      }
+    } else if (kPending == 'y') {
+      switch (kValue) {
+        case 'y': {
+          pending_normal_command_.clear();
+          const std::size_t kLines = ConsumeCountOr(1);
+          if (kLines == 0) {
+            state_.SetStatus("Nothing to yank", StatusSeverity::kWarning);
+            return;
+          }
+
+          if (CopyLineRange(state_.CursorLine(), kLines)) {
+            std::ostringstream message;
+            message << "Yanked " << kLines << " line";
+            if (kLines != 1) {
+              message << 's';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        case 'W': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          TextPosition current = start;
+          std::size_t requested = ConsumeCountOr(1);
+          if (requested == 0) {
+            requested = 1;
+          }
+
+          std::size_t completed = 0;
+          for (; completed < requested; ++completed) {
+            TextPosition next = NextBigWordStart(buffer_view, current);
+            if (next == current) {
+              break;
+            }
+            current = next;
+          }
+
+          if (completed == 0) {
+            state_.SetStatus("No WORD ahead", StatusSeverity::kWarning);
+            return;
+          }
+
+          if (CopyCharacterRange(start.line, start.column, current.line,
+                                 current.column)) {
+            std::ostringstream message;
+            message << "Yanked " << completed << " WORD";
+            if (completed != 1) {
+              message << 's';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        case 'B': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          TextPosition current = start;
+          std::size_t requested = ConsumeCountOr(1);
+          if (requested == 0) {
+            requested = 1;
+          }
+
+          std::size_t completed = 0;
+          for (; completed < requested; ++completed) {
+            TextPosition prev = PreviousBigWordStart(buffer_view, current);
+            if (prev == current) {
+              break;
+            }
+            current = prev;
+          }
+
+          if (completed == 0) {
+            state_.SetStatus("No WORD before", StatusSeverity::kWarning);
+          } else if (CopyCharacterRange(current.line, current.column,
+                                        start.line, start.column)) {
+            std::ostringstream message;
+            message << "Yanked " << completed << " WORD";
+            if (completed != 1) {
+              message << 's';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        case 'E': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          TextPosition current = start;
+          std::size_t requested = ConsumeCountOr(1);
+          if (requested == 0) {
+            requested = 1;
+          }
+
+          std::size_t completed = 0;
+          TextPosition last = start;
+          for (; completed < requested; ++completed) {
+            TextPosition end = BigWordEndInclusive(buffer_view, current);
+            if (end == current && end == last) {
+              break;
+            }
+            last = end;
+            current = TextPosition{end.line, end.column + 1};
+          }
+
+          if (completed == 0) {
+            state_.SetStatus("No WORD ahead", StatusSeverity::kWarning);
+          } else {
+            const std::string& line_text = buffer_view.GetLine(last.line);
+            std::size_t exclusive_column =
+                std::min<std::size_t>(last.column + 1, line_text.size());
+            if (CopyCharacterRange(start.line, start.column, last.line,
+                                   exclusive_column)) {
+              std::ostringstream message;
+              message << "Yanked " << completed << " WORD";
+              if (completed != 1) {
+                message << 's';
+              }
+              state_.SetStatus(message.str(), StatusSeverity::kInfo);
+            } else {
+              state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+            }
+          }
+          return;
+        }
+        case 'j': {
+          pending_normal_command_.clear();
+          const std::size_t kLines =
+              std::max<std::size_t>(1, ConsumeCountOr(2));
+          if (CopyLineRange(state_.CursorLine(), kLines)) {
+            std::ostringstream message;
+            message << "Yanked " << kLines << " line";
+            if (kLines != 1) {
+              message << 's';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        case 'k': {
+          const std::size_t kLines =
+              std::max<std::size_t>(1, ConsumeCountOr(2));
+          const std::size_t kCurrent = state_.CursorLine();
+          const std::size_t kStart =
+              kLines > kCurrent + 1 ? 0 : kCurrent + 1 - kLines;
+          pending_normal_command_.clear();
+          if (CopyLineRange(kStart, kLines)) {
+            std::ostringstream message;
+            message << "Yanked " << kLines << " line";
+            if (kLines != 1) {
+              message << 's';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        case '}': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          if (buffer_view.LineCount() == 0) {
+            state_.SetStatus("Buffer empty", StatusSeverity::kWarning);
+            return;
+          }
+
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          std::size_t count = ConsumeCountOr(1);
+          if (count == 0) {
+            count = 1;
+          }
+
+          TextPosition target =
+              NextParagraphBoundary(buffer_view, start, count);
+          if (target == start) {
+            state_.SetStatus("No paragraph ahead", StatusSeverity::kWarning);
+            return;
+          }
+
+          if (CopyCharacterRange(start.line, start.column, target.line,
+                                 target.column)) {
+            std::ostringstream message;
+            message << "Yanked to paragraph";
+            if (count > 1) {
+              message << " (" << count << ')';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        case '{': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          if (buffer_view.LineCount() == 0) {
+            state_.SetStatus("Buffer empty", StatusSeverity::kWarning);
+            return;
+          }
+
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          std::size_t count = ConsumeCountOr(1);
+          if (count == 0) {
+            count = 1;
+          }
+
+          TextPosition target =
+              PreviousParagraphBoundary(buffer_view, start, count);
+          if (target == start) {
+            state_.SetStatus("No paragraph before", StatusSeverity::kWarning);
+            return;
+          }
+
+          if (CopyCharacterRange(target.line, target.column, start.line,
+                                 start.column)) {
+            std::ostringstream message;
+            message << "Yanked to paragraph";
+            if (count > 1) {
+              message << " (" << count << ')';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        case 'w': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          TextPosition current = start;
+          std::size_t requested = ConsumeCountOr(1);
+          if (requested == 0) {
+            requested = 1;
+          }
+
+          std::size_t completed = 0;
+          for (; completed < requested; ++completed) {
+            TextPosition next = NextWordStart(buffer_view, current);
+            if (next == current) {
+              break;
+            }
+            current = next;
+          }
+
+          if (completed == 0) {
+            state_.SetStatus("No word ahead", StatusSeverity::kWarning);
+            return;
+          }
+
+          if (CopyCharacterRange(start.line, start.column, current.line,
+                                 current.column)) {
+            std::ostringstream message;
+            message << "Yanked " << completed << " word";
+            if (completed != 1) {
+              message << 's';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        case 'b': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          TextPosition current = start;
+          std::size_t requested = ConsumeCountOr(1);
+          if (requested == 0) {
+            requested = 1;
+          }
+
+          std::size_t completed = 0;
+          for (; completed < requested; ++completed) {
+            TextPosition prev = PreviousWordStart(buffer_view, current);
+            if (prev == current) {
+              break;
+            }
+            current = prev;
+          }
+
+          if (completed == 0) {
+            state_.SetStatus("No word before", StatusSeverity::kWarning);
+          } else if (CopyCharacterRange(current.line, current.column,
+                                        start.line, start.column)) {
+            std::ostringstream message;
+            message << "Yanked " << completed << " word";
+            if (completed != 1) {
+              message << 's';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        case 'e': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          TextPosition current = start;
+          std::size_t requested = ConsumeCountOr(1);
+          if (requested == 0) {
+            requested = 1;
+          }
+
+          std::size_t completed = 0;
+          TextPosition last = start;
+          for (; completed < requested; ++completed) {
+            TextPosition end = WordEndInclusive(buffer_view, current);
+            if (end == current && end == last) {
+              break;
+            }
+            last = end;
+            current = TextPosition{end.line, end.column + 1};
+          }
+
+          if (completed == 0) {
+            state_.SetStatus("No word ahead", StatusSeverity::kWarning);
+          } else {
+            const std::string& line_text = buffer_view.GetLine(last.line);
+            std::size_t exclusive_column =
+                std::min<std::size_t>(last.column + 1, line_text.size());
+            if (CopyCharacterRange(start.line, start.column, last.line,
+                                   exclusive_column)) {
+              std::ostringstream message;
+              message << "Yanked " << completed << " word";
+              if (completed != 1) {
+                message << 's';
+              }
+              state_.SetStatus(message.str(), StatusSeverity::kInfo);
+            } else {
+              state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+            }
+          }
+          return;
+        }
+        case 'f':
+        case 'F':
+        case 't':
+        case 'T': {
+          pending_normal_command_.push_back(kValue);
+          state_.SetStatus(
+              FormatPendingStatus(pending_normal_command_, prefix_count_,
+                                  has_prefix_count_, motion_count_,
+                                  has_motion_count_),
+              StatusSeverity::kInfo);
+          return;
+        }
+        case ';': {
+          pending_normal_command_.clear();
+          ApplyRepeatFind(false, FindCommandAction::kYank);
+          return;
+        }
+        case ',': {
+          pending_normal_command_.clear();
+          ApplyRepeatFind(true, FindCommandAction::kYank);
+          return;
+        }
+        case '$': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          if (buffer_view.LineCount() == 0) {
+            state_.SetStatus("Buffer empty", StatusSeverity::kWarning);
+            return;
+          }
+
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          std::size_t count = ConsumeCountOr(1);
+          if (count == 0) {
+            count = 1;
+          }
+
+          const std::size_t kLastLine = buffer_view.LineCount() - 1;
+          std::size_t target_line = start.line;
+          if (count > 1) {
+            const std::size_t kDelta = count - 1;
+            target_line = (std::min)(start.line + kDelta, kLastLine);
+          }
+
+          TextPosition end = LineEndPosition(buffer_view, target_line);
+          if (start == end) {
+            state_.SetStatus("Nothing to yank", StatusSeverity::kWarning);
+            return;
+          }
+
+          if (CopyCharacterRange(start.line, start.column, end.line,
+                                 end.column)) {
+            std::ostringstream message;
+            message << "Yanked to line end";
+            if (target_line != start.line) {
+              message << " (" << (target_line - start.line + 1) << " lines)";
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        default:
+          pending_normal_command_.clear();
+          state_.SetStatus("y command requires motion",
                            StatusSeverity::kWarning);
           ResetCount();
           return;
@@ -1962,26 +2400,26 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
     case 'T': {
       pending_normal_command_ = std::string(1, kValue);
       state_.SetStatus(FormatPendingStatus(pending_normal_command_,
-                                          prefix_count_, has_prefix_count_,
-                                          motion_count_, has_motion_count_),
+                                           prefix_count_, has_prefix_count_,
+                                           motion_count_, has_motion_count_),
                        StatusSeverity::kInfo);
       break;
     }
     case ';': {
       pending_normal_command_.clear();
-      ApplyRepeatFind(false, false);
+      ApplyRepeatFind(false, FindCommandAction::kMove);
       break;
     }
     case ',': {
       pending_normal_command_.clear();
-      ApplyRepeatFind(true, false);
+      ApplyRepeatFind(true, FindCommandAction::kMove);
       break;
     }
     case 'd':
       pending_normal_command_ = "d";
       state_.SetStatus(FormatPendingStatus(pending_normal_command_,
-                                          prefix_count_, has_prefix_count_,
-                                          motion_count_, has_motion_count_),
+                                           prefix_count_, has_prefix_count_,
+                                           motion_count_, has_motion_count_),
                        StatusSeverity::kInfo);
       break;
     case kCommandPrefix:
@@ -1999,7 +2437,8 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
   }
 }
 
-bool EditorApp::ApplyFindCommand(char command, bool is_delete, char target) {
+bool EditorApp::ApplyFindCommand(char command, FindCommandAction action,
+                                 char target) {
   FindOperationKind kind = FindKindFromCommand(command);
   const Buffer& buffer_view = state_.GetBuffer();
   TextPosition start{state_.CursorLine(), state_.CursorColumn()};
@@ -2017,27 +2456,31 @@ bool EditorApp::ApplyFindCommand(char command, bool is_delete, char target) {
   const bool kTill = kind == FindOperationKind::kForwardTill ||
                      kind == FindOperationKind::kBackwardTill;
 
-  if (is_delete) {
+  if (action == FindCommandAction::kDelete ||
+      action == FindCommandAction::kYank) {
     auto& buffer = state_.GetBuffer();
     const std::string& line_text = buffer.GetLine(start.line);
     const std::size_t kLineLength = line_text.size();
 
-    if (!result->backward) {
-      std::size_t end_column = result->include_target_char
-                                   ? result->matched_column + 1
-                                   : result->cursor.column + 1;
-      end_column = (std::min)(end_column, kLineLength);
-      if (end_column <= start.column) {
-        state_.SetStatus("Nothing to delete", StatusSeverity::kWarning);
-        return false;
+    auto perform_delete = [&]() -> bool {
+      if (!result->backward) {
+        std::size_t end_column = result->include_target_char
+                                     ? result->matched_column + 1
+                                     : result->cursor.column + 1;
+        end_column = (std::min)(end_column, kLineLength);
+        if (end_column <= start.column) {
+          state_.SetStatus("Nothing to delete", StatusSeverity::kWarning);
+          return false;
+        }
+        if (!DeleteCharacterRange(start.line, start.column, start.line,
+                                  end_column)) {
+          state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+          return false;
+        }
+        state_.SetCursor(start.line, start.column);
+        return true;
       }
-      if (!DeleteCharacterRange(start.line, start.column, start.line,
-                                end_column)) {
-        state_.SetStatus("Delete failed", StatusSeverity::kWarning);
-        return false;
-      }
-      state_.SetCursor(start.line, start.column);
-    } else {
+
       std::size_t range_start = result->include_target_char
                                     ? result->matched_column
                                     : result->cursor.column;
@@ -2055,15 +2498,67 @@ bool EditorApp::ApplyFindCommand(char command, bool is_delete, char target) {
         return false;
       }
       state_.SetCursor(start.line, range_start);
-    }
+      return true;
+    };
 
-    state_.MoveCursorLine(0);
-    std::ostringstream message;
-    message << "Deleted to '" << target << '\'';
-    if (count > 1) {
-      message << " (" << count << ')';
+    auto perform_yank = [&]() -> bool {
+      if (!result->backward) {
+        std::size_t end_column = result->include_target_char
+                                     ? result->matched_column + 1
+                                     : result->cursor.column + 1;
+        end_column = (std::min)(end_column, kLineLength);
+        if (end_column <= start.column) {
+          state_.SetStatus("Nothing to yank", StatusSeverity::kWarning);
+          return false;
+        }
+        if (!CopyCharacterRange(start.line, start.column, start.line,
+                                end_column)) {
+          state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+          return false;
+        }
+        return true;
+      }
+
+      std::size_t range_start = result->include_target_char
+                                    ? result->matched_column
+                                    : result->cursor.column;
+      if (range_start >= start.column) {
+        state_.SetStatus("Nothing to yank", StatusSeverity::kWarning);
+        return false;
+      }
+      std::size_t range_end = start.column + 1;
+      if (range_end > kLineLength) {
+        range_end = kLineLength;
+      }
+      if (!CopyCharacterRange(start.line, range_start, start.line, range_end)) {
+        state_.SetStatus("Yank failed", StatusSeverity::kWarning);
+        return false;
+      }
+      return true;
+    };
+
+    if (action == FindCommandAction::kDelete) {
+      if (!perform_delete()) {
+        return false;
+      }
+      state_.MoveCursorLine(0);
+      std::ostringstream message;
+      message << "Deleted to '" << target << '\'';
+      if (count > 1) {
+        message << " (" << count << ')';
+      }
+      state_.SetStatus(message.str(), StatusSeverity::kInfo);
+    } else {
+      if (!perform_yank()) {
+        return false;
+      }
+      std::ostringstream message;
+      message << "Yanked to '" << target << '\'';
+      if (count > 1) {
+        message << " (" << count << ')';
+      }
+      state_.SetStatus(message.str(), StatusSeverity::kInfo);
     }
-    state_.SetStatus(message.str(), StatusSeverity::kInfo);
   } else {
     state_.SetCursor(result->cursor.line, result->cursor.column);
     state_.MoveCursorLine(0);
@@ -2077,7 +2572,8 @@ bool EditorApp::ApplyFindCommand(char command, bool is_delete, char target) {
   return true;
 }
 
-bool EditorApp::ApplyRepeatFind(bool reverse_direction, bool is_delete) {
+bool EditorApp::ApplyRepeatFind(bool reverse_direction,
+                                FindCommandAction action) {
   if (!has_last_find_) {
     state_.SetStatus("No previous find", StatusSeverity::kWarning);
     return false;
@@ -2089,7 +2585,7 @@ bool EditorApp::ApplyRepeatFind(bool reverse_direction, bool is_delete) {
   }
 
   char command = CommandFromState(backward, last_find_till_);
-  return ApplyFindCommand(command, is_delete, last_find_target_);
+  return ApplyFindCommand(command, action, last_find_target_);
 }
 
 void EditorApp::HandleInsertMode(const KeyEvent& event) {
@@ -2308,6 +2804,143 @@ std::size_t EditorApp::ConsumeCountOr(std::size_t fallback) noexcept {
 
   ResetCount();
   return result;
+}
+
+bool EditorApp::CopyLineRange(std::size_t start_line, std::size_t line_count) {
+  const Buffer& buffer = state_.GetBuffer();
+  if (buffer.LineCount() == 0 || start_line >= buffer.LineCount() ||
+      line_count == 0) {
+    return false;
+  }
+
+  const std::size_t kAvailable = buffer.LineCount() - start_line;
+  line_count = (std::min)(line_count, kAvailable);
+  if (line_count == 0) {
+    return false;
+  }
+
+  yank_buffer_.clear();
+  yank_buffer_.reserve(line_count);
+  for (std::size_t i = 0; i < line_count; ++i) {
+    yank_buffer_.push_back(buffer.GetLine(start_line + i));
+  }
+  yank_linewise_ = true;
+  return true;
+}
+
+bool EditorApp::CopyCharacterRange(std::size_t start_line,
+                                   std::size_t start_column,
+                                   std::size_t end_line,
+                                   std::size_t end_column) {
+  const Buffer& buffer = state_.GetBuffer();
+  if (buffer.LineCount() == 0) {
+    return false;
+  }
+
+  if (start_line > end_line ||
+      (start_line == end_line && start_column >= end_column)) {
+    return false;
+  }
+
+  start_line = (std::min)(start_line, buffer.LineCount() - 1);
+  end_line = (std::min)(end_line, buffer.LineCount() - 1);
+
+  const std::string& start_text = buffer.GetLine(start_line);
+  const std::string& end_text = buffer.GetLine(end_line);
+
+  start_column = (std::min)(start_column, start_text.size());
+  end_column = (std::min)(end_column, end_text.size());
+
+  if (start_line == end_line) {
+    if (start_column >= end_column) {
+      return false;
+    }
+    yank_buffer_.assign(
+        1, start_text.substr(start_column, end_column - start_column));
+  } else {
+    yank_buffer_.clear();
+    yank_buffer_.reserve(end_line - start_line + 1);
+    yank_buffer_.push_back(start_text.substr(start_column));
+    for (std::size_t line = start_line + 1; line < end_line; ++line) {
+      yank_buffer_.push_back(buffer.GetLine(line));
+    }
+    yank_buffer_.push_back(end_text.substr(0, end_column));
+  }
+
+  yank_linewise_ = false;
+  return true;
+}
+
+bool EditorApp::PasteAfterCursor() {
+  if (!HasYank()) {
+    state_.SetStatus("Nothing to paste", StatusSeverity::kWarning);
+    return false;
+  }
+
+  auto& buffer = state_.GetBuffer();
+  if (buffer.LineCount() == 0) {
+    buffer.InsertLine(0, "");
+  }
+
+  TextPosition cursor{state_.CursorLine(), state_.CursorColumn()};
+  cursor = ClampPosition(buffer, cursor);
+
+  if (yank_linewise_) {
+    const std::size_t kInsertLine = cursor.line + 1;
+    for (std::size_t i = 0; i < yank_buffer_.size(); ++i) {
+      if (!buffer.InsertLine(kInsertLine + i, yank_buffer_[i])) {
+        state_.SetStatus("Paste failed", StatusSeverity::kWarning);
+        return false;
+      }
+    }
+
+    const std::size_t kFirstInserted =
+        (std::min)(kInsertLine, buffer.LineCount() - 1);
+    const std::string& first_line = buffer.GetLine(kFirstInserted);
+    const std::size_t kColumn = FirstNonBlankColumn(first_line);
+    state_.SetCursor(kFirstInserted, kColumn);
+    state_.MoveCursorLine(0);
+    return true;
+  }
+
+  std::size_t line = cursor.line;
+  std::size_t column = cursor.column;
+  std::string& current = buffer.GetLine(line);
+  const std::size_t kInsertColumn = (std::min)(column + 1, current.size());
+  std::string prefix = current.substr(0, kInsertColumn);
+  std::string suffix = current.substr(kInsertColumn);
+  current = prefix + yank_buffer_.front();
+
+  if (yank_buffer_.size() == 1) {
+    current += suffix;
+    const std::size_t kInserted = yank_buffer_.front().size();
+    const std::size_t kCursorColumn =
+        kInserted == 0 ? prefix.size() : prefix.size() + kInserted - 1;
+    state_.SetCursor(line, kCursorColumn);
+    state_.MoveCursorLine(0);
+    return true;
+  }
+
+  for (std::size_t i = 1; i < yank_buffer_.size(); ++i) {
+    const std::size_t kInsertAt = line + i;
+    if (!buffer.InsertLine(kInsertAt, yank_buffer_[i])) {
+      state_.SetStatus("Paste failed", StatusSeverity::kWarning);
+      return false;
+    }
+  }
+
+  const std::size_t kLastInsertedLine = line + yank_buffer_.size() - 1;
+  std::string& last_line = buffer.GetLine(kLastInsertedLine);
+  last_line += suffix;
+  const std::size_t kCursorColumn =
+      yank_buffer_.back().empty() ? 0 : yank_buffer_.back().size() - 1;
+  state_.SetCursor(kLastInsertedLine, kCursorColumn);
+  state_.MoveCursorLine(0);
+  return true;
+}
+
+bool EditorApp::HasYank() const noexcept {
+  return !yank_buffer_.empty();
 }
 
 std::size_t EditorApp::DeleteLineRange(std::size_t start_line,
