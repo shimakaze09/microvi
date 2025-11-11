@@ -29,6 +29,8 @@ class EditorApp {
   void InsertCharacter(char value);
   void InsertNewline();
   void HandleBackspace();
+  bool ApplyFindCommand(char command, bool is_delete, char target);
+  bool ApplyRepeatFind(bool reverse_direction, bool is_delete);
   static void ConfigureConsole();
   void PrepareScreen();
   void RestoreScreen();
@@ -48,6 +50,10 @@ class EditorApp {
   EventQueue event_queue_;
   std::string command_buffer_;
   std::string pending_normal_command_;
+  char last_find_target_ = 0;
+  bool has_last_find_ = false;
+  bool last_find_backward_ = false;
+  bool last_find_till_ = false;
   std::size_t pending_count_ = 0;
   bool has_pending_count_ = false;
   bool screen_prepared_ = false;

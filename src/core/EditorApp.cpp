@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <string>
@@ -37,6 +39,54 @@ struct TextPosition {
   std::size_t column = 0;
 };
 
+struct FindParams {
+  char target = 0;
+  std::size_t count = 1;
+  std::size_t start_column = 0;
+};
+
+enum class FindOperationKind : std::uint8_t {
+  kForwardTo,
+  kForwardTill,
+  kBackwardTo,
+  kBackwardTill,
+};
+
+struct FindMotionResult {
+  TextPosition cursor{};
+  std::size_t matched_column = 0;
+  bool include_target_char = false;
+  bool backward = false;
+};
+
+FindOperationKind FindKindFromCommand(char command) {
+  switch (command) {
+    case 'f':
+      return FindOperationKind::kForwardTo;
+    case 'F':
+      return FindOperationKind::kBackwardTo;
+    case 't':
+      return FindOperationKind::kForwardTill;
+    case 'T':
+      return FindOperationKind::kBackwardTill;
+    default:
+      return FindOperationKind::kForwardTo;
+  }
+}
+
+char CommandFromState(bool backward, bool till) {
+  if (!backward && !till) {
+    return 'f';
+  }
+  if (!backward && till) {
+    return 't';
+  }
+  if (backward && !till) {
+    return 'F';
+  }
+  return 'T';
+}
+
 bool operator==(const TextPosition& lhs, const TextPosition& rhs) {
   return lhs.line == rhs.line && lhs.column == rhs.column;
 }
@@ -48,6 +98,15 @@ bool operator!=(const TextPosition& lhs, const TextPosition& rhs) {
 bool IsWordChar(char ch) {
   const unsigned char kCharacter = static_cast<unsigned char>(ch);
   return std::isalnum(kCharacter) != 0 || kCharacter == '_';
+}
+
+bool IsBlankLine(std::string_view line) {
+  for (unsigned char ch : line) {
+    if (std::isspace(ch) == 0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 TextPosition ClampPosition(const core::Buffer& buffer, TextPosition position) {
@@ -121,6 +180,467 @@ TextPosition NextWordStart(const core::Buffer& buffer, TextPosition position) {
 
   const std::size_t kLastLineIndex = buffer.LineCount() - 1;
   return TextPosition{kLastLineIndex, buffer.GetLine(kLastLineIndex).size()};
+}
+
+TextPosition NextBigWordStart(const core::Buffer& buffer,
+                              TextPosition position) {
+  if (buffer.LineCount() == 0) {
+    return position;
+  }
+
+  position = ClampPosition(buffer, position);
+  bool consumed_segment = false;
+
+  while (position.line < buffer.LineCount()) {
+    const std::string& line = buffer.GetLine(position.line);
+    const std::size_t kLineLength = line.size();
+
+    if (position.column >= kLineLength) {
+      if (position.line + 1 >= buffer.LineCount()) {
+        return TextPosition{position.line, kLineLength};
+      }
+      position.line += 1;
+      position.column = 0;
+      consumed_segment = false;
+      continue;
+    }
+
+    const unsigned char kCurrentChar =
+        static_cast<unsigned char>(line.at(position.column));
+    if (std::isspace(kCurrentChar) != 0) {
+      consumed_segment = false;
+      position.column += 1;
+      continue;
+    }
+
+    if (!consumed_segment) {
+      consumed_segment = true;
+      while (position.column < kLineLength) {
+        const unsigned char kNextChar =
+            static_cast<unsigned char>(line.at(position.column));
+        if (std::isspace(kNextChar) != 0) {
+          break;
+        }
+        position.column += 1;
+      }
+      continue;
+    }
+
+    return position;
+  }
+
+  const std::size_t kLastLineIndex = buffer.LineCount() - 1;
+  return TextPosition{kLastLineIndex, buffer.GetLine(kLastLineIndex).size()};
+}
+
+TextPosition PreviousBigWordStart(const core::Buffer& buffer,
+                                  TextPosition position) {
+  if (buffer.LineCount() == 0) {
+    return position;
+  }
+
+  position = ClampPosition(buffer, position);
+
+  auto retreat_line = [&]() {
+    if (position.line == 0) {
+      position.column = 0;
+      return false;
+    }
+    position.line -= 1;
+    position.column = buffer.GetLine(position.line).size();
+    return true;
+  };
+
+  if (position.column > 0) {
+    position.column -= 1;
+  } else if (!retreat_line()) {
+    return TextPosition{0, 0};
+  }
+
+  while (true) {
+    const std::string& line = buffer.GetLine(position.line);
+    const std::size_t kLineLength = line.size();
+    if (kLineLength == 0) {
+      if (!retreat_line()) {
+        return TextPosition{0, 0};
+      }
+      continue;
+    }
+
+    if (position.column >= kLineLength) {
+      position.column = kLineLength - 1;
+    }
+
+    const unsigned char kCurrentChar =
+        static_cast<unsigned char>(line.at(position.column));
+    if (std::isspace(kCurrentChar) != 0) {
+      if (position.column == 0) {
+        if (!retreat_line()) {
+          return TextPosition{0, 0};
+        }
+      } else {
+        position.column -= 1;
+      }
+      continue;
+    }
+
+    while (position.column > 0) {
+      const unsigned char kPrevChar =
+          static_cast<unsigned char>(line.at(position.column - 1));
+      if (std::isspace(kPrevChar) != 0) {
+        break;
+      }
+      position.column -= 1;
+    }
+
+    return position;
+  }
+}
+
+TextPosition BigWordEndInclusive(const core::Buffer& buffer,
+                                 TextPosition position) {
+  if (buffer.LineCount() == 0) {
+    return position;
+  }
+
+  position = ClampPosition(buffer, position);
+
+  while (position.line < buffer.LineCount()) {
+    const std::string& line = buffer.GetLine(position.line);
+    const std::size_t kLineLength = line.size();
+
+    if (position.column >= kLineLength) {
+      if (position.line + 1 >= buffer.LineCount()) {
+        return TextPosition{position.line, kLineLength};
+      }
+      position.line += 1;
+      position.column = 0;
+      continue;
+    }
+
+    const unsigned char kCurrentChar =
+        static_cast<unsigned char>(line.at(position.column));
+    if (std::isspace(kCurrentChar) != 0) {
+      position.column += 1;
+      continue;
+    }
+
+    std::size_t probe = position.column;
+    while (probe < kLineLength) {
+      const unsigned char kProbeChar =
+          static_cast<unsigned char>(line.at(probe));
+      if (std::isspace(kProbeChar) != 0) {
+        break;
+      }
+      probe += 1;
+    }
+
+    if (probe == position.column) {
+      return position;
+    }
+
+    return TextPosition{position.line, probe - 1};
+  }
+
+  const std::size_t kLastLineIndex = buffer.LineCount() - 1;
+  return TextPosition{kLastLineIndex, buffer.GetLine(kLastLineIndex).size()};
+}
+
+std::size_t FirstNonBlankColumn(const std::string& line) {
+  for (std::size_t i = 0; i < line.size(); ++i) {
+    if (std::isspace(static_cast<unsigned char>(line[i])) == 0) {
+      return i;
+    }
+  }
+  return 0;
+}
+
+std::size_t LastNonBlankColumn(const std::string& line) {
+  if (line.empty()) {
+    return 0;
+  }
+
+  for (std::size_t i = line.size(); i-- > 0;) {
+    if (std::isspace(static_cast<unsigned char>(line[i])) == 0) {
+      return i;
+    }
+  }
+
+  return 0;
+}
+
+TextPosition FirstNonBlankPosition(const core::Buffer& buffer,
+                                   std::size_t line) {
+  if (buffer.LineCount() == 0) {
+    return TextPosition{};
+  }
+  line = (std::min)(line, buffer.LineCount() - 1);
+  const std::string& text = buffer.GetLine(line);
+  return TextPosition{line, FirstNonBlankColumn(text)};
+}
+
+TextPosition LastNonBlankPosition(const core::Buffer& buffer,
+                                  std::size_t line) {
+  if (buffer.LineCount() == 0) {
+    return TextPosition{};
+  }
+  line = (std::min)(line, buffer.LineCount() - 1);
+  const std::string& text = buffer.GetLine(line);
+  if (text.empty()) {
+    return TextPosition{line, 0};
+  }
+  return TextPosition{line, LastNonBlankColumn(text)};
+}
+
+TextPosition NextParagraphBoundary(const core::Buffer& buffer,
+                                   TextPosition position, std::size_t count) {
+  if (buffer.LineCount() == 0) {
+    return position;
+  }
+
+  position = ClampPosition(buffer, position);
+  count = std::max<std::size_t>(1, count);
+
+  for (std::size_t step = 0; step < count; ++step) {
+    bool seen_non_blank = false;
+    for (; position.line < buffer.LineCount(); ++position.line) {
+      const std::string& line = buffer.GetLine(position.line);
+      if (IsBlankLine(line)) {
+        seen_non_blank = false;
+        continue;
+      }
+
+      if (!seen_non_blank) {
+        seen_non_blank = true;
+        continue;
+      }
+
+      std::size_t probe = position.line;
+      for (; probe < buffer.LineCount(); ++probe) {
+        const std::string& probe_line = buffer.GetLine(probe);
+        if (IsBlankLine(probe_line)) {
+          break;
+        }
+      }
+
+      position.line = probe;
+      break;
+    }
+
+    if (position.line >= buffer.LineCount()) {
+      position.line = buffer.LineCount() - 1;
+      position.column = buffer.GetLine(position.line).size();
+      return position;
+    }
+
+    for (; position.line < buffer.LineCount(); ++position.line) {
+      const std::string& line = buffer.GetLine(position.line);
+      if (!IsBlankLine(line)) {
+        break;
+      }
+    }
+  }
+
+  if (position.line >= buffer.LineCount()) {
+    position.line = buffer.LineCount() - 1;
+    position.column = buffer.GetLine(position.line).size();
+    return position;
+  }
+
+  const std::string& line = buffer.GetLine(position.line);
+  position.column = FirstNonBlankColumn(line);
+  return position;
+}
+
+TextPosition PreviousParagraphBoundary(const core::Buffer& buffer,
+                                       TextPosition position,
+                                       std::size_t count) {
+  if (buffer.LineCount() == 0) {
+    return position;
+  }
+
+  position = ClampPosition(buffer, position);
+  count = std::max<std::size_t>(1, count);
+
+  auto retreat_to_previous_line = [&]() {
+    if (position.line == 0) {
+      position.column = 0;
+      return false;
+    }
+    position.line -= 1;
+    position.column = 0;
+    return true;
+  };
+
+  for (std::size_t step = 0; step < count; ++step) {
+    bool seen_non_blank = false;
+
+    while (true) {
+      const std::string& line = buffer.GetLine(position.line);
+      if (IsBlankLine(line)) {
+        if (!retreat_to_previous_line()) {
+          return TextPosition{0, 0};
+        }
+        seen_non_blank = false;
+        continue;
+      }
+
+      if (!seen_non_blank) {
+        seen_non_blank = true;
+        if (!retreat_to_previous_line()) {
+          return TextPosition{0, 0};
+        }
+        continue;
+      }
+
+      break;
+    }
+
+    position.line += 1;
+    while (position.line < buffer.LineCount()) {
+      const std::string& candidate = buffer.GetLine(position.line);
+      if (!IsBlankLine(candidate)) {
+        break;
+      }
+      position.line += 1;
+    }
+  }
+
+  if (position.line >= buffer.LineCount()) {
+    position.line = buffer.LineCount() - 1;
+    position.column = buffer.GetLine(position.line).size();
+    return position;
+  }
+
+  const std::string& line = buffer.GetLine(position.line);
+  position.column = FirstNonBlankColumn(line);
+  return position;
+}
+
+std::optional<std::size_t> FindCharForward(const std::string& line,
+                                           const FindParams& params) {
+  if (line.empty()) {
+    return std::nullopt;
+  }
+
+  std::size_t start_column = params.start_column;
+  if (start_column >= line.size()) {
+    start_column = line.empty() ? 0 : line.size() - 1;
+  }
+
+  std::size_t effective_count = std::max<std::size_t>(1, params.count);
+  std::size_t probe = start_column;
+
+  while (effective_count > 0) {
+    if (probe + 1 >= line.size()) {
+      return std::nullopt;
+    }
+    probe = line.find(params.target, probe + 1);
+    if (probe == std::string::npos) {
+      return std::nullopt;
+    }
+    if (--effective_count == 0) {
+      return probe;
+    }
+  }
+
+  return std::nullopt;
+}
+
+std::optional<std::size_t> FindCharBackward(const std::string& line,
+                                            const FindParams& params) {
+  if (line.empty()) {
+    return std::nullopt;
+  }
+
+  std::size_t effective_count = std::max<std::size_t>(1, params.count);
+  std::size_t start_column = params.start_column;
+  if (start_column >= line.size()) {
+    start_column = line.empty() ? 0 : line.size() - 1;
+  }
+
+  std::size_t probe = start_column;
+
+  while (effective_count > 0) {
+    if (probe == 0) {
+      return std::nullopt;
+    }
+    const std::size_t kSearchFrom = probe - 1;
+    probe = line.rfind(params.target, kSearchFrom);
+    if (probe == std::string::npos) {
+      return std::nullopt;
+    }
+    if (--effective_count == 0) {
+      return probe;
+    }
+  }
+
+  return std::nullopt;
+}
+
+std::optional<FindMotionResult> ResolveFindMotion(const core::Buffer& buffer,
+                                                  TextPosition start,
+                                                  FindParams params,
+                                                  FindOperationKind kind) {
+  if (buffer.LineCount() == 0) {
+    return std::nullopt;
+  }
+
+  start = ClampPosition(buffer, start);
+  if (start.line >= buffer.LineCount()) {
+    return std::nullopt;
+  }
+
+  const std::string& line = buffer.GetLine(start.line);
+  if (line.empty()) {
+    return std::nullopt;
+  }
+
+  const bool kBackward = kind == FindOperationKind::kBackwardTo ||
+                         kind == FindOperationKind::kBackwardTill;
+  const bool kTill = kind == FindOperationKind::kForwardTill ||
+                     kind == FindOperationKind::kBackwardTill;
+
+  params.count = std::max<std::size_t>(1, params.count);
+  params.start_column = start.column;
+
+  std::optional<std::size_t> found = kBackward ? FindCharBackward(line, params)
+                                               : FindCharForward(line, params);
+  if (!found.has_value()) {
+    return std::nullopt;
+  }
+
+  const std::size_t kMatchedColumn = *found;
+  std::size_t cursor_column = kMatchedColumn;
+
+  if (!kBackward) {
+    if (kTill) {
+      if (kMatchedColumn == 0) {
+        return std::nullopt;
+      }
+      cursor_column = kMatchedColumn - 1;
+    }
+  } else {
+    if (kTill) {
+      cursor_column = kMatchedColumn + 1;
+      if (cursor_column > line.size()) {
+        cursor_column = line.size();
+      }
+    }
+  }
+
+  cursor_column = (std::min)(cursor_column, line.size());
+
+  if (cursor_column == start.column) {
+    return std::nullopt;
+  }
+
+  FindMotionResult result;
+  result.cursor = TextPosition{start.line, cursor_column};
+  result.matched_column = kMatchedColumn;
+  result.include_target_char = !kTill;
+  result.backward = kBackward;
+  return result;
 }
 
 TextPosition PreviousWordStart(const core::Buffer& buffer,
@@ -243,8 +763,7 @@ TextPosition WordEndInclusive(const core::Buffer& buffer,
   }
 
   const std::size_t kLastLineIndex = buffer.LineCount() - 1;
-  return TextPosition{kLastLineIndex,
-                      buffer.GetLine(kLastLineIndex).size()};
+  return TextPosition{kLastLineIndex, buffer.GetLine(kLastLineIndex).size()};
 }
 
 TextPosition LineEndPosition(const core::Buffer& buffer, std::size_t line) {
@@ -651,9 +1170,22 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
   }
 
   if (!pending_normal_command_.empty()) {
-    const char kPending = pending_normal_command_.front();
+    if (pending_normal_command_ == "f" || pending_normal_command_ == "F" ||
+        pending_normal_command_ == "t" || pending_normal_command_ == "T") {
+      const char kCommand = pending_normal_command_.front();
+      pending_normal_command_.clear();
+      ApplyFindCommand(kCommand, false, kValue);
+      return;
+    }
 
-    if (kPending == 'd') {
+    if (pending_normal_command_.front() == 'd') {
+      if (pending_normal_command_.size() == 2) {
+        const char kCommand = pending_normal_command_.back();
+        pending_normal_command_.clear();
+        ApplyFindCommand(kCommand, true, kValue);
+        return;
+      }
+
       switch (kValue) {
         case 'd': {
           pending_normal_command_.clear();
@@ -686,6 +1218,124 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
               message << 's';
             }
             state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          }
+          return;
+        }
+        case 'W': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          TextPosition current = start;
+          std::size_t requested = ConsumeCountOr(1);
+          if (requested == 0) {
+            requested = 1;
+          }
+
+          std::size_t completed = 0;
+          for (; completed < requested; ++completed) {
+            TextPosition next = NextBigWordStart(buffer_view, current);
+            if (next == current) {
+              break;
+            }
+            current = next;
+          }
+
+          if (completed == 0) {
+            state_.SetStatus("No WORD ahead", StatusSeverity::kWarning);
+            return;
+          }
+
+          if (DeleteCharacterRange(start.line, start.column, current.line,
+                                   current.column)) {
+            state_.SetCursor(start.line, start.column);
+            state_.MoveCursorLine(0);
+            std::ostringstream message;
+            message << "Deleted " << completed << " WORD";
+            if (completed != 1) {
+              message << 's';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        case 'B': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          TextPosition current = start;
+          std::size_t requested = ConsumeCountOr(1);
+          if (requested == 0) {
+            requested = 1;
+          }
+
+          std::size_t completed = 0;
+          for (; completed < requested; ++completed) {
+            TextPosition prev = PreviousBigWordStart(buffer_view, current);
+            if (prev == current) {
+              break;
+            }
+            current = prev;
+          }
+
+          if (completed == 0) {
+            state_.SetStatus("No WORD before", StatusSeverity::kWarning);
+          } else if (DeleteCharacterRange(current.line, current.column,
+                                          start.line, start.column)) {
+            state_.SetCursor(current.line, current.column);
+            state_.MoveCursorLine(0);
+            std::ostringstream message;
+            message << "Deleted " << completed << " WORD";
+            if (completed != 1) {
+              message << 's';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        case 'E': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          TextPosition current = start;
+          std::size_t requested = ConsumeCountOr(1);
+          if (requested == 0) {
+            requested = 1;
+          }
+
+          std::size_t completed = 0;
+          TextPosition last = start;
+          for (; completed < requested; ++completed) {
+            TextPosition end = BigWordEndInclusive(buffer_view, current);
+            if (end == current && end == last) {
+              break;
+            }
+            last = end;
+            current = TextPosition{end.line, end.column + 1};
+          }
+
+          if (completed == 0) {
+            state_.SetStatus("No WORD ahead", StatusSeverity::kWarning);
+          } else {
+            const std::string& line_text = buffer_view.GetLine(last.line);
+            std::size_t exclusive_column =
+                std::min<std::size_t>(last.column + 1, line_text.size());
+            if (DeleteCharacterRange(start.line, start.column, last.line,
+                                     exclusive_column)) {
+              state_.SetCursor(start.line, start.column);
+              state_.MoveCursorLine(0);
+              std::ostringstream message;
+              message << "Deleted " << completed << " WORD";
+              if (completed != 1) {
+                message << 's';
+              }
+              state_.SetStatus(message.str(), StatusSeverity::kInfo);
+            } else {
+              state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+            }
           }
           return;
         }
@@ -727,6 +1377,78 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
               message << 's';
             }
             state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          }
+          return;
+        }
+        case '}': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          if (buffer_view.LineCount() == 0) {
+            state_.SetStatus("Buffer empty", StatusSeverity::kWarning);
+            return;
+          }
+
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          std::size_t count = ConsumeCountOr(1);
+          if (count == 0) {
+            count = 1;
+          }
+
+          TextPosition target =
+              NextParagraphBoundary(buffer_view, start, count);
+          if (target == start) {
+            state_.SetStatus("No paragraph ahead", StatusSeverity::kWarning);
+            return;
+          }
+
+          if (DeleteCharacterRange(start.line, start.column, target.line,
+                                   target.column)) {
+            state_.SetCursor(start.line, start.column);
+            state_.MoveCursorLine(0);
+            std::ostringstream message;
+            message << "Deleted to paragraph";
+            if (count > 1) {
+              message << " (" << count << ')';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        case '{': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          if (buffer_view.LineCount() == 0) {
+            state_.SetStatus("Buffer empty", StatusSeverity::kWarning);
+            return;
+          }
+
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          std::size_t count = ConsumeCountOr(1);
+          if (count == 0) {
+            count = 1;
+          }
+
+          TextPosition target =
+              PreviousParagraphBoundary(buffer_view, start, count);
+          if (target == start) {
+            state_.SetStatus("No paragraph before", StatusSeverity::kWarning);
+            return;
+          }
+
+          if (DeleteCharacterRange(target.line, target.column, start.line,
+                                   start.column)) {
+            state_.SetCursor(target.line, target.column);
+            state_.MoveCursorLine(0);
+            std::ostringstream message;
+            message << "Deleted to paragraph";
+            if (count > 1) {
+              message << " (" << count << ')';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Delete failed", StatusSeverity::kWarning);
           }
           return;
         }
@@ -791,7 +1513,7 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
           if (completed == 0) {
             state_.SetStatus("No word before", StatusSeverity::kWarning);
           } else if (DeleteCharacterRange(current.line, current.column,
-                                           start.line, start.column)) {
+                                          start.line, start.column)) {
             state_.SetCursor(current.line, current.column);
             state_.MoveCursorLine(0);
             std::ostringstream message;
@@ -846,6 +1568,30 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
               state_.SetStatus("Delete failed", StatusSeverity::kWarning);
             }
           }
+          return;
+        }
+        case 'f':
+        case 'F':
+        case 't':
+        case 'T': {
+          pending_normal_command_.push_back(kValue);
+          std::string status;
+          if (has_pending_count_) {
+            status = std::to_string(pending_count_);
+          }
+          status.push_back('d');
+          status.push_back(kValue);
+          state_.SetStatus(status, StatusSeverity::kInfo);
+          return;
+        }
+        case ';': {
+          pending_normal_command_.clear();
+          ApplyRepeatFind(false, true);
+          return;
+        }
+        case ',': {
+          pending_normal_command_.clear();
+          ApplyRepeatFind(true, true);
           return;
         }
         case '$': {
@@ -956,6 +1702,33 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
       }
       break;
     }
+    case 'B': {
+      pending_normal_command_.clear();
+      const Buffer& buffer_view = state_.GetBuffer();
+      TextPosition current{state_.CursorLine(), state_.CursorColumn()};
+      std::size_t requested = ConsumeCountOr(1);
+      if (requested == 0) {
+        requested = 1;
+      }
+
+      std::size_t completed = 0;
+      for (; completed < requested; ++completed) {
+        TextPosition prev = PreviousBigWordStart(buffer_view, current);
+        if (prev == current) {
+          break;
+        }
+        current = prev;
+      }
+
+      if (current == TextPosition{state_.CursorLine(), state_.CursorColumn()}) {
+        state_.SetStatus("Start of buffer", StatusSeverity::kWarning);
+      } else {
+        state_.SetCursor(current.line, current.column);
+        state_.MoveCursorLine(0);
+        state_.ClearStatus();
+      }
+      break;
+    }
     case 'e': {
       pending_normal_command_.clear();
       const Buffer& buffer_view = state_.GetBuffer();
@@ -968,7 +1741,43 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
       TextPosition last = current;
       std::size_t completed = 0;
       for (; completed < requested; ++completed) {
-        TextPosition end = WordEndInclusive(buffer_view, TextPosition{current.line, current.column});
+        TextPosition end = WordEndInclusive(
+            buffer_view, TextPosition{current.line, current.column});
+        if (end == current && end == last) {
+          break;
+        }
+        last = end;
+        current = TextPosition{end.line, end.column + 1};
+      }
+
+      if (completed == 0) {
+        state_.SetStatus("End of buffer", StatusSeverity::kWarning);
+      } else {
+        std::size_t target_column = last.column;
+        const std::string& line_text = buffer_view.GetLine(last.line);
+        if (target_column >= line_text.size()) {
+          target_column = line_text.empty() ? 0 : line_text.size() - 1;
+        }
+        state_.SetCursor(last.line, target_column);
+        state_.MoveCursorLine(0);
+        state_.ClearStatus();
+      }
+      break;
+    }
+    case 'E': {
+      pending_normal_command_.clear();
+      const Buffer& buffer_view = state_.GetBuffer();
+      TextPosition current{state_.CursorLine(), state_.CursorColumn()};
+      std::size_t requested = ConsumeCountOr(1);
+      if (requested == 0) {
+        requested = 1;
+      }
+
+      TextPosition last = current;
+      std::size_t completed = 0;
+      for (; completed < requested; ++completed) {
+        TextPosition end = BigWordEndInclusive(
+            buffer_view, TextPosition{current.line, current.column});
         if (end == current && end == last) {
           break;
         }
@@ -1018,6 +1827,83 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
       }
       break;
     }
+    case 'W': {
+      pending_normal_command_.clear();
+      const Buffer& buffer_view = state_.GetBuffer();
+      TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+      TextPosition current = start;
+      std::size_t requested = ConsumeCountOr(1);
+      if (requested == 0) {
+        requested = 1;
+      }
+
+      std::size_t completed = 0;
+      for (; completed < requested; ++completed) {
+        TextPosition next = NextBigWordStart(buffer_view, current);
+        if (next == current) {
+          break;
+        }
+        current = next;
+      }
+
+      if (current == start) {
+        state_.SetStatus("End of buffer", StatusSeverity::kWarning);
+      } else {
+        state_.SetCursor(current.line, current.column);
+        state_.MoveCursorLine(0);
+        state_.ClearStatus();
+      }
+      break;
+    }
+    case '}': {
+      pending_normal_command_.clear();
+      const Buffer& buffer_view = state_.GetBuffer();
+      if (buffer_view.LineCount() == 0) {
+        state_.SetStatus("Buffer empty", StatusSeverity::kWarning);
+        break;
+      }
+
+      TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+      std::size_t count = ConsumeCountOr(1);
+      if (count == 0) {
+        count = 1;
+      }
+
+      TextPosition target = NextParagraphBoundary(buffer_view, start, count);
+      if (target == start) {
+        state_.SetStatus("End of buffer", StatusSeverity::kWarning);
+      } else {
+        state_.SetCursor(target.line, target.column);
+        state_.MoveCursorLine(0);
+        state_.ClearStatus();
+      }
+      break;
+    }
+    case '{': {
+      pending_normal_command_.clear();
+      const Buffer& buffer_view = state_.GetBuffer();
+      if (buffer_view.LineCount() == 0) {
+        state_.SetStatus("Buffer empty", StatusSeverity::kWarning);
+        break;
+      }
+
+      TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+      std::size_t count = ConsumeCountOr(1);
+      if (count == 0) {
+        count = 1;
+      }
+
+      TextPosition target =
+          PreviousParagraphBoundary(buffer_view, start, count);
+      if (target == start) {
+        state_.SetStatus("Start of buffer", StatusSeverity::kWarning);
+      } else {
+        state_.SetCursor(target.line, target.column);
+        state_.MoveCursorLine(0);
+        state_.ClearStatus();
+      }
+      break;
+    }
     case '$': {
       pending_normal_command_.clear();
       const Buffer& buffer_view = state_.GetBuffer();
@@ -1044,6 +1930,29 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
       state_.ClearStatus();
       break;
     }
+    case 'f':
+    case 'F':
+    case 't':
+    case 'T': {
+      pending_normal_command_ = std::string(1, kValue);
+      std::string status;
+      if (has_pending_count_) {
+        status = std::to_string(pending_count_);
+      }
+      status.push_back(kValue);
+      state_.SetStatus(status, StatusSeverity::kInfo);
+      break;
+    }
+    case ';': {
+      pending_normal_command_.clear();
+      ApplyRepeatFind(false, false);
+      break;
+    }
+    case ',': {
+      pending_normal_command_.clear();
+      ApplyRepeatFind(true, false);
+      break;
+    }
     case 'd':
       pending_normal_command_ = "d";
       if (has_pending_count_) {
@@ -1066,6 +1975,99 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
       state_.SetStatus("Not mapped in normal mode", StatusSeverity::kWarning);
       break;
   }
+}
+
+bool EditorApp::ApplyFindCommand(char command, bool is_delete, char target) {
+  FindOperationKind kind = FindKindFromCommand(command);
+  const Buffer& buffer_view = state_.GetBuffer();
+  TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+  std::size_t count = ConsumeCountOr(1);
+  FindParams params{};
+  params.target = target;
+  params.count = count;
+
+  auto result = ResolveFindMotion(buffer_view, start, params, kind);
+  if (!result.has_value()) {
+    state_.SetStatus("Target not found", StatusSeverity::kWarning);
+    return false;
+  }
+
+  const bool kTill = kind == FindOperationKind::kForwardTill ||
+                     kind == FindOperationKind::kBackwardTill;
+
+  if (is_delete) {
+    auto& buffer = state_.GetBuffer();
+    const std::string& line_text = buffer.GetLine(start.line);
+    const std::size_t kLineLength = line_text.size();
+
+    if (!result->backward) {
+      std::size_t end_column = result->include_target_char
+                                   ? result->matched_column + 1
+                                   : result->cursor.column + 1;
+      end_column = (std::min)(end_column, kLineLength);
+      if (end_column <= start.column) {
+        state_.SetStatus("Nothing to delete", StatusSeverity::kWarning);
+        return false;
+      }
+      if (!DeleteCharacterRange(start.line, start.column, start.line,
+                                end_column)) {
+        state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+        return false;
+      }
+      state_.SetCursor(start.line, start.column);
+    } else {
+      std::size_t range_start = result->include_target_char
+                                    ? result->matched_column
+                                    : result->cursor.column;
+      if (range_start >= start.column) {
+        state_.SetStatus("Nothing to delete", StatusSeverity::kWarning);
+        return false;
+      }
+      std::size_t range_end = start.column + 1;
+      if (range_end > kLineLength) {
+        range_end = kLineLength;
+      }
+      if (!DeleteCharacterRange(start.line, range_start, start.line,
+                                range_end)) {
+        state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+        return false;
+      }
+      state_.SetCursor(start.line, range_start);
+    }
+
+    state_.MoveCursorLine(0);
+    std::ostringstream message;
+    message << "Deleted to '" << target << '\'';
+    if (count > 1) {
+      message << " (" << count << ')';
+    }
+    state_.SetStatus(message.str(), StatusSeverity::kInfo);
+  } else {
+    state_.SetCursor(result->cursor.line, result->cursor.column);
+    state_.MoveCursorLine(0);
+    state_.ClearStatus();
+  }
+
+  has_last_find_ = true;
+  last_find_target_ = target;
+  last_find_backward_ = result->backward;
+  last_find_till_ = kTill;
+  return true;
+}
+
+bool EditorApp::ApplyRepeatFind(bool reverse_direction, bool is_delete) {
+  if (!has_last_find_) {
+    state_.SetStatus("No previous find", StatusSeverity::kWarning);
+    return false;
+  }
+
+  bool backward = last_find_backward_;
+  if (reverse_direction) {
+    backward = !backward;
+  }
+
+  char command = CommandFromState(backward, last_find_till_);
+  return ApplyFindCommand(command, is_delete, last_find_target_);
 }
 
 void EditorApp::HandleInsertMode(const KeyEvent& event) {
