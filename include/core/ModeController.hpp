@@ -4,10 +4,12 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "core/InputHandler.hpp"
 #include "core/KeyEvent.hpp"
+#include "core/Registry.hpp"
 
 namespace core {
 class EditorState;
@@ -15,6 +17,7 @@ class EditorState;
 class ModeController {
  public:
   ModeController(EditorState& state, InputHandler& command_handler);
+  ~ModeController();
 
   void HandleEvent(const KeyEvent& event);
   std::string_view CommandBuffer() const noexcept;
@@ -30,6 +33,12 @@ class ModeController {
   void HandleInsertMode(const KeyEvent& event);
   void HandleCommandMode(const KeyEvent& event);
   bool ExecuteCommandLine(const std::string& line);
+  void InitializeRegistryBindings();
+  bool ExecuteRegisteredBinding(const KeyEvent& event);
+  static KeybindingMode ToKeybindingMode(Mode mode) noexcept;
+  std::string MakeGesture(const KeyEvent& event) const;
+  bool InvokeCommand(const std::string& command_id,
+                     const std::unordered_map<std::string, std::string>& args);
 
   void InsertCharacter(char value);
   void InsertNewline();
@@ -55,6 +64,7 @@ class ModeController {
 
   EditorState& state_;
   InputHandler& command_handler_;
+  Registry& registry_;
   std::string command_buffer_;
   std::string pending_normal_command_;
   char last_find_target_ = 0;
@@ -67,5 +77,6 @@ class ModeController {
   bool has_motion_count_ = false;
   std::vector<std::string> yank_buffer_;
   bool yank_linewise_ = false;
+  std::vector<RegistrationHandle> registry_handles_;
 };
 }  // namespace core

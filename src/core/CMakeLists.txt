@@ -6,6 +6,7 @@ set(MICROVI_CORE_SOURCES
   "ModeController.cpp"
   "Renderer.cpp"
   "InputHandler.cpp"
+  "Registry.cpp"
   "Theme.cpp"
   "../io/ConsoleKeySource.cpp"
   "../io/Terminal.cpp"

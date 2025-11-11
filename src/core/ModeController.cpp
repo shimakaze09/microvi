@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <initializer_list>
 #include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
+
 
 #include "core/Buffer.hpp"
 #include "core/EditorState.hpp"
@@ -608,7 +611,17 @@ int ToSignedDelta(std::size_t count) {
 namespace core {
 ModeController::ModeController(EditorState& state,
                                InputHandler& command_handler)
-    : state_(state), command_handler_(command_handler) {}
+    : state_(state),
+      command_handler_(command_handler),
+      registry_(Registry::Instance()) {
+  InitializeRegistryBindings();
+}
+
+ModeController::~ModeController() {
+  for (const RegistrationHandle& handle : registry_handles_) {
+    registry_.Unregister(handle);
+  }
+}
 
 void ModeController::HandleEvent(const KeyEvent& event) {
   switch (state_.CurrentMode()) {
@@ -634,6 +647,10 @@ void ModeController::HandleNormalMode(const KeyEvent& event) {
     pending_normal_command_.clear();
     ResetCount();
     state_.ClearStatus();
+    return;
+  }
+
+  if (ExecuteRegisteredBinding(event)) {
     return;
   }
 
@@ -1152,6 +1169,264 @@ void ModeController::HandleCommandMode(const KeyEvent& event) {
     default:
       return;
   }
+}
+
+void ModeController::InitializeRegistryBindings() {
+  // Register the built-in normal-mode commands so they flow through the
+  // registry just like external contributions.
+  Origin origin{RegistryOriginKind::kCore, "core.mode"};
+
+  auto sanitize_gesture = [](const std::string& gesture) {
+    std::string result;
+    result.reserve(gesture.size());
+    for (unsigned char ch : gesture) {
+      if (std::isalnum(static_cast<int>(ch)) != 0) {
+        result.push_back(static_cast<char>(ch));
+      } else {
+        result.push_back('_');
+      }
+    }
+    if (result.empty()) {
+      result = "binding";
+    }
+    return result;
+  };
+
+  auto register_normal = [&](const std::string& command_id,
+                             const std::string& label,
+                             CommandCallable::NativeCallback callback,
+                             std::initializer_list<std::string> gestures) {
+    CommandRegistration command_registration;
+    command_registration.descriptor.id = command_id;
+    command_registration.descriptor.label = label;
+    command_registration.descriptor.short_description = label;
+    command_registration.descriptor.modes = {Mode::kNormal};
+    command_registration.descriptor.capabilities = 0;
+    command_registration.descriptor.undo_scope = UndoScope::kNone;
+    command_registration.callable.native_callback = std::move(callback);
+    command_registration.lifetime = RegistrationLifetime::kSession;
+
+    RegistrationResult command_result =
+        registry_.RegisterCommand(command_registration, origin);
+    if (command_result.status != RegistrationStatus::kRejected &&
+        command_result.handle.IsValid()) {
+      registry_handles_.push_back(command_result.handle);
+    }
+
+    if (command_result.status == RegistrationStatus::kRejected) {
+      return;
+    }
+
+    for (const std::string& gesture : gestures) {
+      KeybindingRegistration binding_registration;
+      binding_registration.descriptor.id =
+          command_id + ".binding." + sanitize_gesture(gesture);
+      binding_registration.descriptor.command_id = command_id;
+      binding_registration.descriptor.mode = KeybindingMode::kNormal;
+      binding_registration.descriptor.gesture = gesture;
+      binding_registration.lifetime = RegistrationLifetime::kSession;
+
+      RegistrationResult binding_result =
+          registry_.RegisterKeybinding(binding_registration, origin);
+      if (binding_result.status != RegistrationStatus::kRejected &&
+          binding_result.handle.IsValid()) {
+        registry_handles_.push_back(binding_result.handle);
+      }
+    }
+  };
+
+  register_normal("core.normal.move_down", "Move Down",
+                  [this](const CommandInvocation&) {
+                    pending_normal_command_.clear();
+                    std::size_t count = ConsumeCountOr(1);
+                    state_.MoveCursorLine(ToSignedDelta(count));
+                    state_.ClearStatus();
+                  },
+                  {"j", "<Down>"});
+
+  register_normal("core.normal.move_up", "Move Up",
+                  [this](const CommandInvocation&) {
+                    pending_normal_command_.clear();
+                    std::size_t count = ConsumeCountOr(1);
+                    state_.MoveCursorLine(-ToSignedDelta(count));
+                    state_.ClearStatus();
+                  },
+                  {"k", "<Up>"});
+
+  register_normal("core.normal.move_left", "Move Left",
+                  [this](const CommandInvocation&) {
+                    pending_normal_command_.clear();
+                    std::size_t count = ConsumeCountOr(1);
+                    state_.MoveCursorColumn(-ToSignedDelta(count));
+                    state_.ClearStatus();
+                  },
+                  {"h", "<Left>"});
+
+  register_normal("core.normal.move_right", "Move Right",
+                  [this](const CommandInvocation&) {
+                    pending_normal_command_.clear();
+                    std::size_t count = ConsumeCountOr(1);
+                    state_.MoveCursorColumn(ToSignedDelta(count));
+                    state_.ClearStatus();
+                  },
+                  {"l", "<Right>"});
+
+  register_normal("core.normal.enter_insert", "Enter Insert Mode",
+                  [this](const CommandInvocation&) {
+                    pending_normal_command_.clear();
+                    ResetCount();
+                    state_.SetMode(Mode::kInsert);
+                    state_.SetStatus("-- INSERT --", StatusSeverity::kInfo);
+                  },
+                  {"i"});
+
+  register_normal("core.normal.append", "Append",
+                  [this](const CommandInvocation&) {
+                    pending_normal_command_.clear();
+                    ResetCount();
+                    state_.MoveCursorColumn(1);
+                    state_.SetMode(Mode::kInsert);
+                    state_.SetStatus("-- INSERT --", StatusSeverity::kInfo);
+                  },
+                  {"a"});
+
+  register_normal("core.normal.append_line_end", "Append at Line End",
+                  [this](const CommandInvocation&) {
+                    pending_normal_command_.clear();
+                    ResetCount();
+                    const Buffer& buffer_view = state_.GetBuffer();
+                    std::size_t line = state_.CursorLine();
+                    std::size_t length = buffer_view.GetLine(line).size();
+                    state_.SetCursor(line, length);
+                    state_.MoveCursorLine(0);
+                    state_.SetMode(Mode::kInsert);
+                    state_.SetStatus("-- INSERT --", StatusSeverity::kInfo);
+                  },
+                  {"A"});
+
+  register_normal("core.normal.insert_line_start", "Insert at Line Start",
+                  [this](const CommandInvocation&) {
+                    pending_normal_command_.clear();
+                    ResetCount();
+                    TextPosition target = FirstNonBlankPosition(
+                        state_.GetBuffer(), state_.CursorLine());
+                    state_.SetCursor(target.line, target.column);
+                    state_.MoveCursorLine(0);
+                    state_.SetMode(Mode::kInsert);
+                    state_.SetStatus("-- INSERT --", StatusSeverity::kInfo);
+                  },
+                  {"I"});
+
+  register_normal("core.normal.insert_below", "Insert Below",
+                  [this](const CommandInvocation&) {
+                    pending_normal_command_.clear();
+                    ResetCount();
+                    InsertNewline();
+                    state_.SetMode(Mode::kInsert);
+                    state_.SetStatus("-- INSERT --", StatusSeverity::kInfo);
+                  },
+                  {"o"});
+
+  register_normal("core.normal.insert_above", "Insert Above",
+                  [this](const CommandInvocation&) {
+                    pending_normal_command_.clear();
+                    ResetCount();
+                    auto& buffer = state_.GetBuffer();
+                    std::size_t line = state_.CursorLine();
+                    if (buffer.InsertLine(line, "")) {
+                      state_.SetCursor(line, 0);
+                      state_.MoveCursorLine(0);
+                    }
+                    state_.SetMode(Mode::kInsert);
+                    state_.SetStatus("-- INSERT --", StatusSeverity::kInfo);
+                  },
+                  {"O"});
+}
+
+bool ModeController::ExecuteRegisteredBinding(const KeyEvent& event) {
+  if (!pending_normal_command_.empty()) {
+    return false;
+  }
+
+  std::string gesture = MakeGesture(event);
+  if (gesture.empty()) {
+    return false;
+  }
+
+  KeybindingMode mode = ToKeybindingMode(state_.CurrentMode());
+  auto binding = registry_.ResolveKeybinding(mode, gesture);
+  if (!binding.has_value()) {
+    binding = registry_.ResolveKeybinding(KeybindingMode::kAny, gesture);
+    if (!binding.has_value()) {
+      return false;
+    }
+  }
+
+  const KeybindingRecord& record = *binding;
+  return InvokeCommand(record.descriptor.command_id,
+                       record.descriptor.arguments);
+}
+
+KeybindingMode ModeController::ToKeybindingMode(Mode mode) noexcept {
+  switch (mode) {
+    case Mode::kNormal:
+      return KeybindingMode::kNormal;
+    case Mode::kInsert:
+      return KeybindingMode::kInsert;
+    case Mode::kCommandLine:
+      return KeybindingMode::kCommand;
+    case Mode::kVisual:
+      return KeybindingMode::kVisual;
+  }
+  return KeybindingMode::kAny;
+}
+
+std::string ModeController::MakeGesture(const KeyEvent& event) const {
+  switch (event.code) {
+    case KeyCode::kCharacter:
+      if (event.value != '\0') {
+        return std::string(1, event.value);
+      }
+      return {};
+    case KeyCode::kEnter:
+      return "<Enter>";
+    case KeyCode::kEscape:
+      return "<Esc>";
+    case KeyCode::kBackspace:
+      return "<Backspace>";
+    case KeyCode::kArrowUp:
+      return "<Up>";
+    case KeyCode::kArrowDown:
+      return "<Down>";
+    case KeyCode::kArrowLeft:
+      return "<Left>";
+    case KeyCode::kArrowRight:
+      return "<Right>";
+    default:
+      return {};
+  }
+}
+
+bool ModeController::InvokeCommand(
+    const std::string& command_id,
+    const std::unordered_map<std::string, std::string>& args) {
+  auto command = registry_.FindCommand(command_id, true);
+  if (!command.has_value()) {
+    state_.SetStatus("Command not found", StatusSeverity::kWarning);
+    return false;
+  }
+
+  const CommandCallable& callable = command->callable;
+  if (callable.native_callback) {
+    CommandInvocation invocation;
+    invocation.command_id = command_id;
+    invocation.arguments = args;
+    callable.native_callback(invocation);
+    return true;
+  }
+
+  state_.SetStatus("Command not executable", StatusSeverity::kWarning);
+  return false;
 }
 
 void ModeController::InsertCharacter(char value) {
