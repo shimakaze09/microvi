@@ -1,4 +1,4 @@
-#include "core/Terminal.hpp"
+#include "io/Terminal.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -14,10 +14,14 @@ auto QueryTerminalSize() -> TerminalSize {
   if (kHandle != nullptr && kHandle != INVALID_HANDLE_VALUE) {
     CONSOLE_SCREEN_BUFFER_INFO info;
     if (GetConsoleScreenBufferInfo(kHandle, &info) != 0) {
-      const std::size_t kRows = static_cast<std::size_t>(info.srWindow.Bottom -
-                                                         info.srWindow.Top + 1);
-      const std::size_t kColumns = static_cast<std::size_t>(
-          info.srWindow.Right - info.srWindow.Left + 1);
+      const int kRowsSpan = static_cast<int>(info.srWindow.Bottom) -
+                            static_cast<int>(info.srWindow.Top) + 1;
+      const int kColumnsSpan = static_cast<int>(info.srWindow.Right) -
+                               static_cast<int>(info.srWindow.Left) + 1;
+      const std::size_t kRows =
+          kRowsSpan > 0 ? static_cast<std::size_t>(kRowsSpan) : 0;
+      const std::size_t kColumns =
+          kColumnsSpan > 0 ? static_cast<std::size_t>(kColumnsSpan) : 0;
       if (kRows > 0 && kColumns > 0) {
         return TerminalSize{kRows, kColumns};
       }

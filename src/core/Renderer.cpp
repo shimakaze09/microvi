@@ -5,13 +5,12 @@
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <utility>
 
 #include "core/Buffer.hpp"
 #include "core/Cursor.hpp"
 #include "core/EditorState.hpp"
 #include "core/Mode.hpp"
-#include "core/Terminal.hpp"
+#include "io/Terminal.hpp"
 
 namespace {
 const char* ModeLabel(core::Mode mode) {
