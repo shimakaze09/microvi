@@ -54,8 +54,10 @@ class EditorApp {
   bool has_last_find_ = false;
   bool last_find_backward_ = false;
   bool last_find_till_ = false;
-  std::size_t pending_count_ = 0;
-  bool has_pending_count_ = false;
+  std::size_t prefix_count_ = 0;
+  std::size_t motion_count_ = 0;
+  bool has_prefix_count_ = false;
+  bool has_motion_count_ = false;
   bool screen_prepared_ = false;
   mutable bool first_render_ = true;
   mutable std::string previous_frame_;

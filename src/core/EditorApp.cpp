@@ -59,6 +59,29 @@ struct FindMotionResult {
   bool backward = false;
 };
 
+constexpr std::size_t kMaxCountValue = 1000000;
+
+std::size_t AppendCountDigit(std::size_t current, std::size_t digit) {
+  const std::size_t kNext = current * 10 + digit;
+  return kNext > kMaxCountValue ? kMaxCountValue : kNext;
+}
+
+std::string FormatPendingStatus(std::string_view pending_command,
+                                std::size_t prefix_count,
+                                bool has_prefix_count,
+                                std::size_t motion_count,
+                                bool has_motion_count) {
+  std::string status;
+  if (has_prefix_count && prefix_count > 0) {
+    status += std::to_string(prefix_count);
+  }
+  status.append(pending_command);
+  if (has_motion_count && motion_count > 0) {
+    status += std::to_string(motion_count);
+  }
+  return status;
+}
+
 FindOperationKind FindKindFromCommand(char command) {
   switch (command) {
     case 'f':
@@ -1126,7 +1149,7 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
 
   const char kValue = event.value;
 
-  if (kValue == '0' && !has_pending_count_) {
+  if (kValue == '0' && !has_prefix_count_ && !has_motion_count_) {
     if (pending_normal_command_ == "d") {
       const std::size_t kLine = state_.CursorLine();
       const Buffer& buffer_view = state_.GetBuffer();
@@ -1157,15 +1180,20 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
   }
 
   if (std::isdigit(static_cast<unsigned char>(kValue)) != 0) {
-    has_pending_count_ = true;
-    pending_count_ =
-        pending_count_ * 10 + static_cast<std::size_t>(kValue - '0');
-    constexpr std::size_t kMaxCount = 1000000;
-    if (pending_count_ > kMaxCount) {
-      pending_count_ = kMaxCount;
+    const std::size_t kDigit =
+        static_cast<std::size_t>(kValue - '0');
+    if (pending_normal_command_.empty()) {
+      has_prefix_count_ = true;
+      prefix_count_ = AppendCountDigit(prefix_count_, kDigit);
+      state_.SetStatus(std::to_string(prefix_count_), StatusSeverity::kInfo);
+    } else {
+      has_motion_count_ = true;
+      motion_count_ = AppendCountDigit(motion_count_, kDigit);
+      state_.SetStatus(FormatPendingStatus(pending_normal_command_,
+                                          prefix_count_, has_prefix_count_,
+                                          motion_count_, has_motion_count_),
+                       StatusSeverity::kInfo);
     }
-
-    state_.SetStatus(std::to_string(pending_count_), StatusSeverity::kInfo);
     return;
   }
 
@@ -1575,13 +1603,11 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
         case 't':
         case 'T': {
           pending_normal_command_.push_back(kValue);
-          std::string status;
-          if (has_pending_count_) {
-            status = std::to_string(pending_count_);
-          }
-          status.push_back('d');
-          status.push_back(kValue);
-          state_.SetStatus(status, StatusSeverity::kInfo);
+          state_.SetStatus(
+              FormatPendingStatus(pending_normal_command_, prefix_count_,
+                                   has_prefix_count_, motion_count_,
+                                   has_motion_count_),
+              StatusSeverity::kInfo);
           return;
         }
         case ';': {
@@ -1935,12 +1961,10 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
     case 't':
     case 'T': {
       pending_normal_command_ = std::string(1, kValue);
-      std::string status;
-      if (has_pending_count_) {
-        status = std::to_string(pending_count_);
-      }
-      status.push_back(kValue);
-      state_.SetStatus(status, StatusSeverity::kInfo);
+      state_.SetStatus(FormatPendingStatus(pending_normal_command_,
+                                          prefix_count_, has_prefix_count_,
+                                          motion_count_, has_motion_count_),
+                       StatusSeverity::kInfo);
       break;
     }
     case ';': {
@@ -1955,12 +1979,10 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
     }
     case 'd':
       pending_normal_command_ = "d";
-      if (has_pending_count_) {
-        state_.SetStatus(std::to_string(pending_count_) + "d",
-                         StatusSeverity::kInfo);
-      } else {
-        state_.SetStatus("d", StatusSeverity::kInfo);
-      }
+      state_.SetStatus(FormatPendingStatus(pending_normal_command_,
+                                          prefix_count_, has_prefix_count_,
+                                          motion_count_, has_motion_count_),
+                       StatusSeverity::kInfo);
       break;
     case kCommandPrefix:
       pending_normal_command_.clear();
@@ -2263,19 +2285,29 @@ void EditorApp::ProcessPendingEvents() {
 }
 
 void EditorApp::ResetCount() noexcept {
-  pending_count_ = 0;
-  has_pending_count_ = false;
+  prefix_count_ = 0;
+  motion_count_ = 0;
+  has_prefix_count_ = false;
+  has_motion_count_ = false;
 }
 
 std::size_t EditorApp::ConsumeCountOr(std::size_t fallback) noexcept {
-  if (!has_pending_count_ || pending_count_ == 0) {
-    ResetCount();
-    return fallback;
+  const bool kHasPrefix = has_prefix_count_ && prefix_count_ > 0;
+  const bool kHasMotion = has_motion_count_ && motion_count_ > 0;
+
+  std::size_t result = fallback;
+  if (kHasMotion) {
+    result = motion_count_;
+    if (kHasPrefix) {
+      const std::size_t kProduct = prefix_count_ * result;
+      result = (std::min)(kProduct, kMaxCountValue);
+    }
+  } else if (kHasPrefix) {
+    result = prefix_count_;
   }
 
-  std::size_t count = pending_count_;
   ResetCount();
-  return count;
+  return result;
 }
 
 std::size_t EditorApp::DeleteLineRange(std::size_t start_line,
