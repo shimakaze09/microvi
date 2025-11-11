@@ -10,7 +10,6 @@
 #include "core/InputHandler.hpp"
 #include "core/Theme.hpp"
 
-
 namespace core {
 class EditorApp {
  public:
@@ -37,6 +36,8 @@ class EditorApp {
   void StopInputLoop();
   void InputLoop(const std::stop_token& token);
   void ProcessPendingEvents();
+  void ResetCount() noexcept;
+  std::size_t ConsumeCountOr(std::size_t fallback) noexcept;
 
   EditorState state_;
   ConsoleKeySource key_source_;
@@ -44,6 +45,8 @@ class EditorApp {
   EventQueue event_queue_;
   std::string command_buffer_;
   std::string pending_normal_command_;
+  std::size_t pending_count_ = 0;
+  bool has_pending_count_ = false;
   bool screen_prepared_ = false;
   mutable bool first_render_ = true;
   mutable std::string previous_frame_;

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <span>
 #include <sstream>
@@ -13,6 +14,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
 
 #include "commands/DeleteCommand.hpp"
 #include "commands/QuitCommand.hpp"
@@ -83,6 +85,18 @@ std::string FitToWidth(std::string text, std::size_t width) {
     text.resize(width);
   }
   return text;
+}
+
+int ToSignedDelta(std::size_t count) {
+  if (count == 0) {
+    return 0;
+  }
+  constexpr std::size_t kMax =
+      static_cast<std::size_t>((std::numeric_limits<int>::max)());
+  if (count > kMax) {
+    return (std::numeric_limits<int>::max)();
+  }
+  return static_cast<int>(count);
 }
 }  // namespace
 
@@ -286,64 +300,111 @@ void EditorApp::HandleEvent(const KeyEvent& event) {
 
 void EditorApp::HandleNormalMode(const KeyEvent& event) {
   if (event.code == KeyCode::kEscape) {
-    if (!pending_normal_command_.empty()) {
-      pending_normal_command_.clear();
-    }
+    pending_normal_command_.clear();
+    ResetCount();
     state_.ClearStatus();
     return;
   }
 
   if (event.code == KeyCode::kArrowDown) {
     pending_normal_command_.clear();
-    state_.MoveCursorLine(1);
+    const std::size_t kCount = ConsumeCountOr(1);
+    state_.MoveCursorLine(ToSignedDelta(kCount));
     state_.ClearStatus();
     return;
   }
   if (event.code == KeyCode::kArrowUp) {
     pending_normal_command_.clear();
-    state_.MoveCursorLine(-1);
+    const std::size_t kCount = ConsumeCountOr(1);
+    state_.MoveCursorLine(-ToSignedDelta(kCount));
     state_.ClearStatus();
     return;
   }
   if (event.code == KeyCode::kArrowLeft) {
     pending_normal_command_.clear();
-    state_.MoveCursorColumn(-1);
+    const std::size_t kCount = ConsumeCountOr(1);
+    state_.MoveCursorColumn(-ToSignedDelta(kCount));
     state_.ClearStatus();
     return;
   }
   if (event.code == KeyCode::kArrowRight) {
     pending_normal_command_.clear();
-    state_.MoveCursorColumn(1);
+    const std::size_t kCount = ConsumeCountOr(1);
+    state_.MoveCursorColumn(ToSignedDelta(kCount));
     state_.ClearStatus();
     return;
   }
   if (event.code != KeyCode::kCharacter) {
     pending_normal_command_.clear();
+    ResetCount();
     state_.ClearStatus();
     return;
   }
 
   const char kValue = event.value;
 
+  if (std::isdigit(static_cast<unsigned char>(kValue)) != 0) {
+    if (!has_pending_count_ && pending_normal_command_.empty() &&
+        kValue == '0') {
+      state_.SetStatus("0 not mapped in normal mode", StatusSeverity::kWarning);
+      ResetCount();
+      return;
+    }
+
+    has_pending_count_ = true;
+    pending_count_ =
+        pending_count_ * 10 + static_cast<std::size_t>(kValue - '0');
+    constexpr std::size_t kMaxCount = 1000000;
+    if (pending_count_ > kMaxCount) {
+      pending_count_ = kMaxCount;
+    }
+
+    state_.SetStatus(std::to_string(pending_count_), StatusSeverity::kInfo);
+    return;
+  }
+
   if (!pending_normal_command_.empty()) {
     const char kPending = pending_normal_command_.front();
-    pending_normal_command_.clear();
 
     if (kPending == 'd') {
       if (kValue == 'd') {
+        pending_normal_command_.clear();
         auto& buffer = state_.GetBuffer();
-        const std::size_t kTargetLine = state_.CursorLine();
-        if (buffer.DeleteLine(kTargetLine)) {
+        const std::size_t kStartLine = state_.CursorLine();
+        if (buffer.LineCount() == 0 || kStartLine >= buffer.LineCount()) {
+          state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+          ResetCount();
+          return;
+        }
+
+        const std::size_t kCount = ConsumeCountOr(1);
+        std::size_t deleted = 0;
+        for (std::size_t i = 0; i < kCount && kStartLine < buffer.LineCount();
+             ++i) {
+          if (buffer.DeleteLine(kStartLine)) {
+            ++deleted;
+          } else {
+            break;
+          }
+        }
+
+        if (deleted == 0) {
+          state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+        } else {
           state_.MoveCursorLine(0);
           std::ostringstream message;
-          message << "Deleted line " << (kTargetLine + 1);
+          message << "Deleted " << deleted << " line";
+          if (deleted != 1) {
+            message << 's';
+          }
           state_.SetStatus(message.str(), StatusSeverity::kInfo);
-        } else {
-          state_.SetStatus("Delete failed", StatusSeverity::kWarning);
         }
         return;
       }
+      pending_normal_command_.clear();
       state_.SetStatus("d command requires motion", StatusSeverity::kWarning);
+      ResetCount();
+      return;
     }
     // Fall through for unmatched combinations so the current key is
     // processed normally.
@@ -352,41 +413,49 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
   switch (kValue) {
     case 'i':
       pending_normal_command_.clear();
+      ResetCount();
       state_.SetMode(Mode::kInsert);
       state_.ClearStatus();
       break;
     case 'j':
       pending_normal_command_.clear();
-      state_.MoveCursorLine(1);
+      state_.MoveCursorLine(ToSignedDelta(ConsumeCountOr(1)));
       state_.ClearStatus();
       break;
     case 'k':
       pending_normal_command_.clear();
-      state_.MoveCursorLine(-1);
+      state_.MoveCursorLine(-ToSignedDelta(ConsumeCountOr(1)));
       state_.ClearStatus();
       break;
     case 'h':
       pending_normal_command_.clear();
-      state_.MoveCursorColumn(-1);
+      state_.MoveCursorColumn(-ToSignedDelta(ConsumeCountOr(1)));
       state_.ClearStatus();
       break;
     case 'l':
       pending_normal_command_.clear();
-      state_.MoveCursorColumn(1);
+      state_.MoveCursorColumn(ToSignedDelta(ConsumeCountOr(1)));
       state_.ClearStatus();
       break;
     case 'd':
       pending_normal_command_ = "d";
-      state_.ClearStatus();
+      if (has_pending_count_) {
+        state_.SetStatus(std::to_string(pending_count_) + "d",
+                         StatusSeverity::kInfo);
+      } else {
+        state_.SetStatus("d", StatusSeverity::kInfo);
+      }
       break;
     case kCommandPrefix:
       pending_normal_command_.clear();
+      ResetCount();
       state_.SetMode(Mode::kCommandLine);
       command_buffer_.clear();
       state_.ClearStatus();
       break;
     default:
       pending_normal_command_.clear();
+      ResetCount();
       state_.SetStatus("Not mapped in normal mode", StatusSeverity::kWarning);
       break;
   }
@@ -553,7 +622,7 @@ void EditorApp::RestoreScreen() {
 void EditorApp::StartInputLoop() {
   StopInputLoop();
   input_thread_ =
-      std::jthread([this](std::stop_token token) { InputLoop(token); });
+      std::jthread([this](const std::stop_token& token) { InputLoop(token); });
 }
 
 void EditorApp::StopInputLoop() {
@@ -582,6 +651,22 @@ void EditorApp::ProcessPendingEvents() {
       break;
     }
   }
+}
+
+void EditorApp::ResetCount() noexcept {
+  pending_count_ = 0;
+  has_pending_count_ = false;
+}
+
+std::size_t EditorApp::ConsumeCountOr(std::size_t fallback) noexcept {
+  if (!has_pending_count_ || pending_count_ == 0) {
+    ResetCount();
+    return fallback;
+  }
+
+  std::size_t count = pending_count_;
+  ResetCount();
+  return count;
 }
 
 bool EditorApp::ExecuteCommandLine(const std::string& line) {
