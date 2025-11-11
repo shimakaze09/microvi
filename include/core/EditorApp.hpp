@@ -38,6 +38,7 @@ class EditorApp {
   void ProcessPendingEvents();
   void ResetCount() noexcept;
   std::size_t ConsumeCountOr(std::size_t fallback) noexcept;
+  std::size_t DeleteLineRange(std::size_t start_line, std::size_t line_count);
 
   EditorState state_;
   ConsoleKeySource key_source_;

@@ -307,6 +307,25 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
   }
 
   if (event.code == KeyCode::kArrowDown) {
+    if (pending_normal_command_ == "d") {
+      pending_normal_command_.clear();
+      const std::size_t kLines = std::max<std::size_t>(1, ConsumeCountOr(2));
+      const std::size_t kDeleted =
+          DeleteLineRange(state_.CursorLine(), kLines);
+      if (kDeleted == 0) {
+        state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+      } else {
+        state_.MoveCursorLine(0);
+        std::ostringstream message;
+        message << "Deleted " << kDeleted << " line";
+        if (kDeleted != 1) {
+          message << 's';
+        }
+        state_.SetStatus(message.str(), StatusSeverity::kInfo);
+      }
+      return;
+    }
+
     pending_normal_command_.clear();
     const std::size_t kCount = ConsumeCountOr(1);
     state_.MoveCursorLine(ToSignedDelta(kCount));
@@ -314,6 +333,27 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
     return;
   }
   if (event.code == KeyCode::kArrowUp) {
+    if (pending_normal_command_ == "d") {
+      const std::size_t kLines = std::max<std::size_t>(1, ConsumeCountOr(2));
+      const std::size_t kCurrent = state_.CursorLine();
+      const std::size_t kStart = kLines > kCurrent + 1 ? 0 : kCurrent + 1 - kLines;
+      pending_normal_command_.clear();
+      const std::size_t kDeleted = DeleteLineRange(kStart, kLines);
+      if (kDeleted == 0) {
+        state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+      } else {
+        state_.SetCursor(kStart, 0);
+        state_.MoveCursorLine(0);
+        std::ostringstream message;
+        message << "Deleted " << kDeleted << " line";
+        if (kDeleted != 1) {
+          message << 's';
+        }
+        state_.SetStatus(message.str(), StatusSeverity::kInfo);
+      }
+      return;
+    }
+
     pending_normal_command_.clear();
     const std::size_t kCount = ConsumeCountOr(1);
     state_.MoveCursorLine(-ToSignedDelta(kCount));
@@ -395,6 +435,45 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
           std::ostringstream message;
           message << "Deleted " << deleted << " line";
           if (deleted != 1) {
+            message << 's';
+          }
+          state_.SetStatus(message.str(), StatusSeverity::kInfo);
+        }
+        return;
+      }
+      if (kValue == 'j') {
+        pending_normal_command_.clear();
+        const std::size_t kLines = std::max<std::size_t>(1, ConsumeCountOr(2));
+        const std::size_t kDeleted =
+            DeleteLineRange(state_.CursorLine(), kLines);
+        if (kDeleted == 0) {
+          state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+        } else {
+          state_.MoveCursorLine(0);
+          std::ostringstream message;
+          message << "Deleted " << kDeleted << " line";
+          if (kDeleted != 1) {
+            message << 's';
+          }
+          state_.SetStatus(message.str(), StatusSeverity::kInfo);
+        }
+        return;
+      }
+      if (kValue == 'k') {
+        const std::size_t kLines = std::max<std::size_t>(1, ConsumeCountOr(2));
+        const std::size_t kCurrent = state_.CursorLine();
+        const std::size_t kStart =
+            kLines > kCurrent + 1 ? 0 : kCurrent + 1 - kLines;
+        pending_normal_command_.clear();
+        const std::size_t kDeleted = DeleteLineRange(kStart, kLines);
+        if (kDeleted == 0) {
+          state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+        } else {
+          state_.SetCursor(kStart, 0);
+          state_.MoveCursorLine(0);
+          std::ostringstream message;
+          message << "Deleted " << kDeleted << " line";
+          if (kDeleted != 1) {
             message << 's';
           }
           state_.SetStatus(message.str(), StatusSeverity::kInfo);
@@ -667,6 +746,30 @@ std::size_t EditorApp::ConsumeCountOr(std::size_t fallback) noexcept {
   std::size_t count = pending_count_;
   ResetCount();
   return count;
+}
+
+std::size_t EditorApp::DeleteLineRange(std::size_t start_line,
+                                       std::size_t line_count) {
+  if (line_count == 0) {
+    return 0;
+  }
+
+  auto& buffer = state_.GetBuffer();
+  if (buffer.LineCount() == 0 || start_line >= buffer.LineCount()) {
+    return 0;
+  }
+
+  std::size_t deleted = 0;
+  for (std::size_t i = 0; i < line_count && start_line < buffer.LineCount();
+       ++i) {
+    if (buffer.DeleteLine(start_line)) {
+      ++deleted;
+    } else {
+      break;
+    }
+  }
+
+  return deleted;
 }
 
 bool EditorApp::ExecuteCommandLine(const std::string& line) {
