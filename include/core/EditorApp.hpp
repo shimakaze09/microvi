@@ -39,6 +39,8 @@ class EditorApp {
   void ResetCount() noexcept;
   std::size_t ConsumeCountOr(std::size_t fallback) noexcept;
   std::size_t DeleteLineRange(std::size_t start_line, std::size_t line_count);
+  bool DeleteCharacterRange(std::size_t start_line, std::size_t start_column,
+                            std::size_t end_line, std::size_t end_column);
 
   EditorState state_;
   ConsoleKeySource key_source_;

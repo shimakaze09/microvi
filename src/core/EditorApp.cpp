@@ -15,7 +15,6 @@
 #include <utility>
 #include <vector>
 
-
 #include "commands/DeleteCommand.hpp"
 #include "commands/QuitCommand.hpp"
 #include "commands/WriteCommand.hpp"
@@ -32,6 +31,107 @@
 
 namespace {
 constexpr char kCommandPrefix = ':';
+
+struct TextPosition {
+  std::size_t line = 0;
+  std::size_t column = 0;
+};
+
+bool operator==(const TextPosition& lhs, const TextPosition& rhs) {
+  return lhs.line == rhs.line && lhs.column == rhs.column;
+}
+
+bool operator!=(const TextPosition& lhs, const TextPosition& rhs) {
+  return !(lhs == rhs);
+}
+
+bool IsWordChar(char ch) {
+  const unsigned char kCharacter = static_cast<unsigned char>(ch);
+  return std::isalnum(kCharacter) != 0 || kCharacter == '_';
+}
+
+TextPosition ClampPosition(const core::Buffer& buffer, TextPosition position) {
+  if (buffer.LineCount() == 0) {
+    return position;
+  }
+
+  if (position.line >= buffer.LineCount()) {
+    position.line = buffer.LineCount() - 1;
+  }
+
+  const std::string& line = buffer.GetLine(position.line);
+  if (position.column > line.size()) {
+    position.column = line.size();
+  }
+
+  return position;
+}
+
+TextPosition NextWordStart(const core::Buffer& buffer, TextPosition position) {
+  if (buffer.LineCount() == 0) {
+    return position;
+  }
+
+  position = ClampPosition(buffer, position);
+
+  bool consumed_segment = false;
+
+  while (position.line < buffer.LineCount()) {
+    const std::string& line = buffer.GetLine(position.line);
+    const std::size_t kLineLength = line.size();
+
+    if (position.column >= kLineLength) {
+      if (position.line + 1 >= buffer.LineCount()) {
+        return TextPosition{position.line, kLineLength};
+      }
+      position.line += 1;
+      position.column = 0;
+      consumed_segment = false;
+      continue;
+    }
+
+    const unsigned char kCurrentChar =
+        static_cast<unsigned char>(line.at(position.column));
+    if (std::isspace(kCurrentChar) != 0) {
+      consumed_segment = false;
+      position.column += 1;
+      continue;
+    }
+
+    if (!consumed_segment) {
+      const bool kInitialIsWord = IsWordChar(static_cast<char>(kCurrentChar));
+      consumed_segment = true;
+      while (position.column < kLineLength) {
+        const unsigned char kNextChar =
+            static_cast<unsigned char>(line.at(position.column));
+        if (std::isspace(kNextChar) != 0) {
+          break;
+        }
+        const bool kNextIsWord = IsWordChar(static_cast<char>(kNextChar));
+        if (kNextIsWord != kInitialIsWord) {
+          break;
+        }
+        position.column += 1;
+      }
+      continue;
+    }
+
+    return position;
+  }
+
+  const std::size_t kLastLineIndex = buffer.LineCount() - 1;
+  return TextPosition{kLastLineIndex, buffer.GetLine(kLastLineIndex).size()};
+}
+
+TextPosition LineEndPosition(const core::Buffer& buffer, std::size_t line) {
+  if (buffer.LineCount() == 0) {
+    return TextPosition{};
+  }
+  if (line >= buffer.LineCount()) {
+    line = buffer.LineCount() - 1;
+  }
+  return TextPosition{line, buffer.GetLine(line).size()};
+}
 
 const char* ModeLabel(core::Mode mode) {
   switch (mode) {
@@ -310,8 +410,7 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
     if (pending_normal_command_ == "d") {
       pending_normal_command_.clear();
       const std::size_t kLines = std::max<std::size_t>(1, ConsumeCountOr(2));
-      const std::size_t kDeleted =
-          DeleteLineRange(state_.CursorLine(), kLines);
+      const std::size_t kDeleted = DeleteLineRange(state_.CursorLine(), kLines);
       if (kDeleted == 0) {
         state_.SetStatus("Delete failed", StatusSeverity::kWarning);
       } else {
@@ -336,7 +435,8 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
     if (pending_normal_command_ == "d") {
       const std::size_t kLines = std::max<std::size_t>(1, ConsumeCountOr(2));
       const std::size_t kCurrent = state_.CursorLine();
-      const std::size_t kStart = kLines > kCurrent + 1 ? 0 : kCurrent + 1 - kLines;
+      const std::size_t kStart =
+          kLines > kCurrent + 1 ? 0 : kCurrent + 1 - kLines;
       pending_normal_command_.clear();
       const std::size_t kDeleted = DeleteLineRange(kStart, kLines);
       if (kDeleted == 0) {
@@ -383,14 +483,37 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
 
   const char kValue = event.value;
 
-  if (std::isdigit(static_cast<unsigned char>(kValue)) != 0) {
-    if (!has_pending_count_ && pending_normal_command_.empty() &&
-        kValue == '0') {
-      state_.SetStatus("0 not mapped in normal mode", StatusSeverity::kWarning);
+  if (kValue == '0' && !has_pending_count_) {
+    if (pending_normal_command_ == "d") {
+      const std::size_t kLine = state_.CursorLine();
+      const Buffer& buffer_view = state_.GetBuffer();
+      const std::size_t kColumn =
+          (std::min)(state_.CursorColumn(), buffer_view.GetLine(kLine).size());
+      pending_normal_command_.clear();
       ResetCount();
+      if (kColumn == 0) {
+        state_.SetStatus("Already at line start", StatusSeverity::kWarning);
+      } else if (DeleteCharacterRange(kLine, 0, kLine, kColumn)) {
+        state_.SetCursor(kLine, 0);
+        state_.MoveCursorLine(0);
+        state_.SetStatus("Deleted to line start", StatusSeverity::kInfo);
+      } else {
+        state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+      }
       return;
     }
 
+    if (pending_normal_command_.empty()) {
+      ResetCount();
+      const std::size_t kLine = state_.CursorLine();
+      state_.SetCursor(kLine, 0);
+      state_.MoveCursorLine(0);
+      state_.ClearStatus();
+      return;
+    }
+  }
+
+  if (std::isdigit(static_cast<unsigned char>(kValue)) != 0) {
     has_pending_count_ = true;
     pending_count_ =
         pending_count_ * 10 + static_cast<std::size_t>(kValue - '0');
@@ -407,83 +530,170 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
     const char kPending = pending_normal_command_.front();
 
     if (kPending == 'd') {
-      if (kValue == 'd') {
-        pending_normal_command_.clear();
-        auto& buffer = state_.GetBuffer();
-        const std::size_t kStartLine = state_.CursorLine();
-        if (buffer.LineCount() == 0 || kStartLine >= buffer.LineCount()) {
-          state_.SetStatus("Delete failed", StatusSeverity::kWarning);
-          ResetCount();
+      switch (kValue) {
+        case 'd': {
+          pending_normal_command_.clear();
+          auto& buffer = state_.GetBuffer();
+          const std::size_t kStartLine = state_.CursorLine();
+          if (buffer.LineCount() == 0 || kStartLine >= buffer.LineCount()) {
+            state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+            ResetCount();
+            return;
+          }
+
+          const std::size_t kCount = ConsumeCountOr(1);
+          std::size_t deleted = 0;
+          for (std::size_t i = 0; i < kCount && kStartLine < buffer.LineCount();
+               ++i) {
+            if (buffer.DeleteLine(kStartLine)) {
+              ++deleted;
+            } else {
+              break;
+            }
+          }
+
+          if (deleted == 0) {
+            state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+          } else {
+            state_.MoveCursorLine(0);
+            std::ostringstream message;
+            message << "Deleted " << deleted << " line";
+            if (deleted != 1) {
+              message << 's';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          }
           return;
         }
-
-        const std::size_t kCount = ConsumeCountOr(1);
-        std::size_t deleted = 0;
-        for (std::size_t i = 0; i < kCount && kStartLine < buffer.LineCount();
-             ++i) {
-          if (buffer.DeleteLine(kStartLine)) {
-            ++deleted;
+        case 'j': {
+          pending_normal_command_.clear();
+          const std::size_t kLines =
+              std::max<std::size_t>(1, ConsumeCountOr(2));
+          const std::size_t kDeleted =
+              DeleteLineRange(state_.CursorLine(), kLines);
+          if (kDeleted == 0) {
+            state_.SetStatus("Delete failed", StatusSeverity::kWarning);
           } else {
-            break;
+            state_.MoveCursorLine(0);
+            std::ostringstream message;
+            message << "Deleted " << kDeleted << " line";
+            if (kDeleted != 1) {
+              message << 's';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
           }
+          return;
         }
+        case 'k': {
+          const std::size_t kLines =
+              std::max<std::size_t>(1, ConsumeCountOr(2));
+          const std::size_t kCurrent = state_.CursorLine();
+          const std::size_t kStart =
+              kLines > kCurrent + 1 ? 0 : kCurrent + 1 - kLines;
+          pending_normal_command_.clear();
+          const std::size_t kDeleted = DeleteLineRange(kStart, kLines);
+          if (kDeleted == 0) {
+            state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+          } else {
+            state_.SetCursor(kStart, 0);
+            state_.MoveCursorLine(0);
+            std::ostringstream message;
+            message << "Deleted " << kDeleted << " line";
+            if (kDeleted != 1) {
+              message << 's';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          }
+          return;
+        }
+        case 'w': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          TextPosition current = start;
+          std::size_t requested = ConsumeCountOr(1);
+          if (requested == 0) {
+            requested = 1;
+          }
 
-        if (deleted == 0) {
-          state_.SetStatus("Delete failed", StatusSeverity::kWarning);
-        } else {
-          state_.MoveCursorLine(0);
-          std::ostringstream message;
-          message << "Deleted " << deleted << " line";
-          if (deleted != 1) {
-            message << 's';
+          std::size_t completed = 0;
+          for (; completed < requested; ++completed) {
+            TextPosition next = NextWordStart(buffer_view, current);
+            if (next == current) {
+              break;
+            }
+            current = next;
           }
-          state_.SetStatus(message.str(), StatusSeverity::kInfo);
-        }
-        return;
-      }
-      if (kValue == 'j') {
-        pending_normal_command_.clear();
-        const std::size_t kLines = std::max<std::size_t>(1, ConsumeCountOr(2));
-        const std::size_t kDeleted =
-            DeleteLineRange(state_.CursorLine(), kLines);
-        if (kDeleted == 0) {
-          state_.SetStatus("Delete failed", StatusSeverity::kWarning);
-        } else {
-          state_.MoveCursorLine(0);
-          std::ostringstream message;
-          message << "Deleted " << kDeleted << " line";
-          if (kDeleted != 1) {
-            message << 's';
+
+          if (completed == 0) {
+            state_.SetStatus("No word ahead", StatusSeverity::kWarning);
+            return;
           }
-          state_.SetStatus(message.str(), StatusSeverity::kInfo);
-        }
-        return;
-      }
-      if (kValue == 'k') {
-        const std::size_t kLines = std::max<std::size_t>(1, ConsumeCountOr(2));
-        const std::size_t kCurrent = state_.CursorLine();
-        const std::size_t kStart =
-            kLines > kCurrent + 1 ? 0 : kCurrent + 1 - kLines;
-        pending_normal_command_.clear();
-        const std::size_t kDeleted = DeleteLineRange(kStart, kLines);
-        if (kDeleted == 0) {
-          state_.SetStatus("Delete failed", StatusSeverity::kWarning);
-        } else {
-          state_.SetCursor(kStart, 0);
-          state_.MoveCursorLine(0);
-          std::ostringstream message;
-          message << "Deleted " << kDeleted << " line";
-          if (kDeleted != 1) {
-            message << 's';
+
+          if (DeleteCharacterRange(start.line, start.column, current.line,
+                                   current.column)) {
+            state_.SetCursor(start.line, start.column);
+            state_.MoveCursorLine(0);
+            std::ostringstream message;
+            message << "Deleted " << completed << " word";
+            if (completed != 1) {
+              message << 's';
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Delete failed", StatusSeverity::kWarning);
           }
-          state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          return;
         }
-        return;
+        case '$': {
+          pending_normal_command_.clear();
+          const Buffer& buffer_view = state_.GetBuffer();
+          if (buffer_view.LineCount() == 0) {
+            state_.SetStatus("Buffer empty", StatusSeverity::kWarning);
+            return;
+          }
+
+          TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+          std::size_t count = ConsumeCountOr(1);
+          if (count == 0) {
+            count = 1;
+          }
+
+          const std::size_t kLastLine = buffer_view.LineCount() - 1;
+          std::size_t target_line = start.line;
+          if (count > 1) {
+            const std::size_t kDelta = count - 1;
+            target_line = (std::min)(start.line + kDelta, kLastLine);
+          }
+
+          TextPosition end = LineEndPosition(buffer_view, target_line);
+          if (start == end) {
+            state_.SetStatus("Nothing to delete", StatusSeverity::kWarning);
+            return;
+          }
+
+          if (DeleteCharacterRange(start.line, start.column, end.line,
+                                   end.column)) {
+            state_.SetCursor(start.line, start.column);
+            state_.MoveCursorLine(0);
+            std::ostringstream message;
+            message << "Deleted to line end";
+            if (target_line != start.line) {
+              message << " (" << (target_line - start.line + 1) << " lines)";
+            }
+            state_.SetStatus(message.str(), StatusSeverity::kInfo);
+          } else {
+            state_.SetStatus("Delete failed", StatusSeverity::kWarning);
+          }
+          return;
+        }
+        default:
+          pending_normal_command_.clear();
+          state_.SetStatus("d command requires motion",
+                           StatusSeverity::kWarning);
+          ResetCount();
+          return;
       }
-      pending_normal_command_.clear();
-      state_.SetStatus("d command requires motion", StatusSeverity::kWarning);
-      ResetCount();
-      return;
     }
     // Fall through for unmatched combinations so the current key is
     // processed normally.
@@ -516,6 +726,60 @@ void EditorApp::HandleNormalMode(const KeyEvent& event) {
       state_.MoveCursorColumn(ToSignedDelta(ConsumeCountOr(1)));
       state_.ClearStatus();
       break;
+    case 'w': {
+      pending_normal_command_.clear();
+      const Buffer& buffer_view = state_.GetBuffer();
+      TextPosition start{state_.CursorLine(), state_.CursorColumn()};
+      TextPosition current = start;
+      std::size_t requested = ConsumeCountOr(1);
+      if (requested == 0) {
+        requested = 1;
+      }
+
+      std::size_t completed = 0;
+      for (; completed < requested; ++completed) {
+        TextPosition next = NextWordStart(buffer_view, current);
+        if (next == current) {
+          break;
+        }
+        current = next;
+      }
+
+      if (current == start) {
+        state_.SetStatus("End of buffer", StatusSeverity::kWarning);
+      } else {
+        state_.SetCursor(current.line, current.column);
+        state_.MoveCursorLine(0);
+        state_.ClearStatus();
+      }
+      break;
+    }
+    case '$': {
+      pending_normal_command_.clear();
+      const Buffer& buffer_view = state_.GetBuffer();
+      if (buffer_view.LineCount() == 0) {
+        state_.SetStatus("Buffer empty", StatusSeverity::kWarning);
+        break;
+      }
+
+      std::size_t count = ConsumeCountOr(1);
+      if (count == 0) {
+        count = 1;
+      }
+
+      const std::size_t kLastLine = buffer_view.LineCount() - 1;
+      std::size_t target_line = state_.CursorLine();
+      if (count > 1) {
+        const std::size_t kDelta = count - 1;
+        target_line = (std::min)(target_line + kDelta, kLastLine);
+      }
+
+      TextPosition target = LineEndPosition(buffer_view, target_line);
+      state_.SetCursor(target.line, target.column);
+      state_.MoveCursorLine(0);
+      state_.ClearStatus();
+      break;
+    }
     case 'd':
       pending_normal_command_ = "d";
       if (has_pending_count_) {
@@ -770,6 +1034,52 @@ std::size_t EditorApp::DeleteLineRange(std::size_t start_line,
   }
 
   return deleted;
+}
+
+bool EditorApp::DeleteCharacterRange(std::size_t start_line,
+                                     std::size_t start_column,
+                                     std::size_t end_line,
+                                     std::size_t end_column) {
+  auto& buffer = state_.GetBuffer();
+  const Buffer& buffer_const = buffer;
+  if (buffer.LineCount() == 0) {
+    return false;
+  }
+
+  if (start_line > end_line ||
+      (start_line == end_line && start_column >= end_column)) {
+    return false;
+  }
+
+  start_line = (std::min)(start_line, buffer.LineCount() - 1);
+  end_line = (std::min)(end_line, buffer.LineCount() - 1);
+
+  const std::string& start_line_text = buffer_const.GetLine(start_line);
+  const std::string& end_line_text = buffer_const.GetLine(end_line);
+
+  start_column = (std::min)(start_column, start_line_text.size());
+  end_column = (std::min)(end_column, end_line_text.size());
+
+  if (start_line == end_line) {
+    if (start_column >= end_column) {
+      return false;
+    }
+    std::string& target = buffer.GetLine(start_line);
+    target.erase(start_column, end_column - start_column);
+    return true;
+  }
+
+  std::string prefix = start_line_text.substr(0, start_column);
+  std::string suffix = end_line_text.substr(end_column);
+
+  const std::size_t kLinesToDelete = end_line - start_line;
+  for (std::size_t i = 0; i < kLinesToDelete; ++i) {
+    buffer.DeleteLine(start_line + 1);
+  }
+
+  std::string& merged = buffer.GetLine(start_line);
+  merged = std::move(prefix) + std::move(suffix);
+  return true;
 }
 
 bool EditorApp::ExecuteCommandLine(const std::string& line) {
