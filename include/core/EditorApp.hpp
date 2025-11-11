@@ -10,7 +10,7 @@
 #include "core/EditorState.hpp"
 #include "core/EventQueue.hpp"
 #include "core/InputHandler.hpp"
-#include "core/Theme.hpp"
+#include "core/Renderer.hpp"
 
 namespace core {
 class EditorApp {
@@ -21,13 +21,12 @@ class EditorApp {
 
  private:
   void LoadFile(int argc, char** argv);
-  void Render() const;
+  void Render();
   void HandleEvent(const KeyEvent& event);
   void HandleNormalMode(const KeyEvent& event);
   void HandleInsertMode(const KeyEvent& event);
   void HandleCommandMode(const KeyEvent& event);
   bool ExecuteCommandLine(const std::string& line);
-  void UpdateScroll(std::size_t content_rows) const;
   void InsertCharacter(char value);
   void InsertNewline();
   void HandleBackspace();
@@ -42,8 +41,6 @@ class EditorApp {
   bool HandleDeleteOperator(char motion);
   bool HandleYankOperator(char motion);
   static void ConfigureConsole();
-  void PrepareScreen();
-  void RestoreScreen();
   void StartInputLoop();
   void StopInputLoop();
   void InputLoop(const std::stop_token& token);
@@ -75,11 +72,7 @@ class EditorApp {
   bool has_motion_count_ = false;
   std::vector<std::string> yank_buffer_;
   bool yank_linewise_ = false;
-  bool screen_prepared_ = false;
-  mutable bool first_render_ = true;
-  mutable std::string previous_frame_;
-  mutable std::size_t scroll_offset_ = 0;
-  Theme theme_ = DefaultTheme();
+  Renderer renderer_;
   std::jthread input_thread_;
 };
 }  // namespace core

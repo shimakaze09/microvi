@@ -4,6 +4,7 @@ set(MICROVI_CORE_SOURCES
   "EventQueue.cpp"
   "EditorState.cpp"
   "EditorApp.cpp"
+  "Renderer.cpp"
   "InputHandler.cpp"
   "Theme.cpp"
   "Terminal.cpp"

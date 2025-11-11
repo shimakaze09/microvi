@@ -4,7 +4,6 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
-#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -21,11 +20,8 @@
 #include "commands/QuitCommand.hpp"
 #include "commands/WriteCommand.hpp"
 #include "core/Buffer.hpp"
-#include "core/Cursor.hpp"
 #include "core/KeyEvent.hpp"
 #include "core/Mode.hpp"
-#include "core/Terminal.hpp"
-#include "core/Theme.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -798,18 +794,6 @@ TextPosition LineEndPosition(const core::Buffer& buffer, std::size_t line) {
   return TextPosition{line, buffer.GetLine(line).size()};
 }
 
-const char* ModeLabel(core::Mode mode) {
-  switch (mode) {
-    case core::Mode::kInsert:
-      return "-- INSERT --";
-    case core::Mode::kCommandLine:
-      return "-- COMMAND --";
-    case core::Mode::kNormal:
-    default:
-      return "-- NORMAL --";
-  }
-}
-
 std::string TrimCopy(std::string_view value) {
   const auto kFirst = value.find_first_not_of(" \t\r\n");
   if (kFirst == std::string_view::npos) {
@@ -821,35 +805,6 @@ std::string TrimCopy(std::string_view value) {
 
 bool IsCommandSeparator(char ch) {
   return ch == '|' || ch == ';';
-}
-
-bool IsHighlightSeverity(core::StatusSeverity severity) {
-  return severity == core::StatusSeverity::kWarning ||
-         severity == core::StatusSeverity::kError;
-}
-
-const std::string& HighlightColor(const core::Theme& theme,
-                                  core::StatusSeverity severity) {
-  switch (severity) {
-    case core::StatusSeverity::kWarning:
-      return theme.status_warning;
-    case core::StatusSeverity::kError:
-      return theme.status_error;
-    case core::StatusSeverity::kInfo:
-    case core::StatusSeverity::kNone:
-    default:
-      return theme.status_info;
-  }
-}
-
-std::string FitToWidth(std::string text, std::size_t width) {
-  if (width == 0) {
-    return {};
-  }
-  if (text.size() > width) {
-    text.resize(width);
-  }
-  return text;
 }
 
 int ToSignedDelta(std::size_t count) {
@@ -874,7 +829,7 @@ EditorApp::EditorApp() {
 }
 
 int EditorApp::Run(int argc, char** argv) {
-  PrepareScreen();
+  renderer_.Prepare();
   LoadFile(argc, argv);
   StartInputLoop();
   Render();
@@ -897,7 +852,7 @@ int EditorApp::Run(int argc, char** argv) {
   }
 
   StopInputLoop();
-  RestoreScreen();
+  renderer_.Restore();
   return 0;
 }
 
@@ -929,123 +884,8 @@ void EditorApp::LoadFile(int argc, char** argv) {
   state_.SetStatus("New Buffer", StatusSeverity::kInfo);
 }
 
-void EditorApp::Render() const {
-  const TerminalSize kSize = QueryTerminalSize();
-  const std::size_t kTotalRows = std::max<std::size_t>(kSize.rows, 3);
-  const std::size_t kTotalColumns = kSize.columns;
-
-  const std::size_t kInfoRows = 2;
-  const std::size_t kContentRows =
-      kTotalRows > kInfoRows ? kTotalRows - kInfoRows : 0;
-
-  UpdateScroll(kContentRows);
-
-  const auto& buffer = state_.GetBuffer();
-  const std::size_t kTotalLines = buffer.LineCount();
-  const std::size_t kLineDigits = std::max<std::size_t>(
-      1, std::to_string(std::max<std::size_t>(1, kTotalLines)).size());
-  const std::size_t kPrefixWidth = 2 + kLineDigits + 1;
-
-  std::ostringstream frame;
-  frame << "\x1b[?25l" << "\x1b[H";
-
-  for (std::size_t row = 0; row < kContentRows; ++row) {
-    std::ostringstream line_stream;
-    const std::size_t kLineIndex = scroll_offset_ + row;
-    if (kLineIndex < kTotalLines) {
-      const bool kIsCursorLine = kLineIndex == state_.CursorLine();
-      line_stream << (kIsCursorLine ? "> " : "  ");
-      line_stream << std::setw(static_cast<int>(kLineDigits))
-                  << (kLineIndex + 1) << ' ' << buffer.GetLine(kLineIndex);
-    } else {
-      line_stream << "  " << std::string(kLineDigits, ' ') << ' ' << '~';
-    }
-
-    std::string line_text = FitToWidth(line_stream.str(), kTotalColumns);
-    frame << line_text << "\x1b[K";
-    frame << '\n';
-  }
-
-  if (kContentRows == 0) {
-    frame << "\x1b[K\n";
-  }
-
-  const StatusSeverity kSeverity = state_.StatusLevel();
-  const bool kHighlightStatus = IsHighlightSeverity(kSeverity);
-
-  if (kHighlightStatus) {
-    std::string highlight_text = FitToWidth(state_.Status(), kTotalColumns);
-    const std::string& color = HighlightColor(theme_, kSeverity);
-    const std::size_t kPadding = kTotalColumns > highlight_text.size()
-                                     ? kTotalColumns - highlight_text.size()
-                                     : 0;
-    frame << color << highlight_text;
-    if (kPadding > 0) {
-      frame << std::string(kPadding, ' ');
-    }
-    frame << theme_.reset << "\x1b[K" << '\n';
-  } else {
-    std::ostringstream status_stream;
-    const std::string kFileLabel =
-        buffer.FilePath().empty() ? "[No Name]" : buffer.FilePath();
-    status_stream << ModeLabel(state_.CurrentMode()) << ' ' << kFileLabel;
-    if (buffer.IsDirty()) {
-      status_stream << " [+]";
-    }
-    status_stream << "  Ln " << (state_.CursorLine() + 1) << ", Col "
-                  << (state_.CursorColumn() + 1) << "  Lines " << kTotalLines;
-    frame << FitToWidth(status_stream.str(), kTotalColumns) << "\x1b[K" << '\n';
-  }
-
-  std::string message_line;
-  if (state_.CurrentMode() == Mode::kCommandLine) {
-    message_line = std::string(1, kCommandPrefix) + command_buffer_;
-  } else if (kSeverity == StatusSeverity::kInfo) {
-    message_line = state_.Status();
-  }
-  frame << FitToWidth(message_line, kTotalColumns) << "\x1b[K";
-
-  frame << "\x1b[J";
-
-  Cursor cursor;
-  if (state_.CurrentMode() == Mode::kCommandLine) {
-    cursor.row = kContentRows + 2;
-    cursor.column = 1 + 1 + command_buffer_.size();
-  } else {
-    if (kContentRows == 0) {
-      cursor.row = 1;
-    } else {
-      const std::size_t kRelativeLine =
-          state_.CursorLine() < scroll_offset_
-              ? 0
-              : state_.CursorLine() - scroll_offset_;
-      cursor.row = std::min<std::size_t>(kRelativeLine + 1, kContentRows);
-    }
-    cursor.column = kPrefixWidth + state_.CursorColumn() + 1;
-  }
-
-  cursor.row = std::max<std::size_t>(1, cursor.row);
-  cursor.column = std::max<std::size_t>(1, cursor.column);
-
-  if (kTotalRows > 0 && cursor.row > kTotalRows) {
-    cursor.row = kTotalRows;
-  }
-  if (kTotalColumns > 0 && cursor.column > kTotalColumns) {
-    cursor.column = kTotalColumns;
-  }
-
-  const std::string kFrameContent = frame.str();
-  if (kFrameContent != previous_frame_) {
-    if (first_render_) {
-      std::cout << "\x1b[2J";
-    }
-    std::cout << kFrameContent;
-    previous_frame_ = kFrameContent;
-  }
-
-  std::cout << "\x1b[" << cursor.row << ';' << cursor.column << 'H'
-            << "\x1b[?25h" << std::flush;
-  first_render_ = false;
+void EditorApp::Render() {
+  renderer_.Render(state_, command_buffer_, kCommandPrefix);
 }
 
 void EditorApp::HandleEvent(const KeyEvent& event) {
@@ -2725,27 +2565,6 @@ void EditorApp::ConfigureConsole() {
 #endif
 }
 
-void EditorApp::PrepareScreen() {
-  if (screen_prepared_) {
-    return;
-  }
-
-  previous_frame_.clear();
-  first_render_ = true;
-  screen_prepared_ = true;
-}
-
-void EditorApp::RestoreScreen() {
-  if (!screen_prepared_) {
-    return;
-  }
-
-  std::cout << "\x1b[?25h\x1b[0m\x1b[2J\x1b[H" << std::flush;
-  screen_prepared_ = false;
-  previous_frame_.clear();
-  first_render_ = true;
-}
-
 void EditorApp::StartInputLoop() {
   StopInputLoop();
   input_thread_ =
@@ -3073,35 +2892,4 @@ bool EditorApp::ExecuteCommandLine(const std::string& line) {
   return success;
 }
 
-void EditorApp::UpdateScroll(std::size_t content_rows) const {
-  if (content_rows == 0) {
-    scroll_offset_ = 0;
-    return;
-  }
-
-  const auto& buffer = state_.GetBuffer();
-  const std::size_t kTotalLines = buffer.LineCount();
-
-  if (kTotalLines == 0) {
-    scroll_offset_ = 0;
-    return;
-  }
-
-  if (scroll_offset_ >= kTotalLines) {
-    scroll_offset_ = kTotalLines - 1;
-  }
-
-  const std::size_t kCursorLine = state_.CursorLine();
-  if (kCursorLine < scroll_offset_) {
-    scroll_offset_ = kCursorLine;
-  } else if (kCursorLine >= scroll_offset_ + content_rows) {
-    scroll_offset_ = kCursorLine - content_rows + 1;
-  }
-
-  const std::size_t kMaxOffset =
-      kTotalLines > content_rows ? kTotalLines - content_rows : 0;
-  if (scroll_offset_ > kMaxOffset) {
-    scroll_offset_ = kMaxOffset;
-  }
-}
 }  // namespace core
